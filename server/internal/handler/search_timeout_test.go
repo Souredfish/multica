@@ -118,7 +118,7 @@ func TestRunSearchQuery_WorkMemIsTransactionLocal(t *testing.T) {
 	if err := conn.QueryRow(ctx, "SHOW work_mem").Scan(&before); err != nil {
 		t.Fatalf("read baseline work_mem: %v", err)
 	}
-	var readOnlyBefore bool
+	var readOnlyBefore string
 	if err := conn.QueryRow(ctx, "SHOW transaction_read_only").Scan(&readOnlyBefore); err != nil {
 		t.Fatalf("read baseline transaction_read_only: %v", err)
 	}
@@ -148,7 +148,7 @@ func TestRunSearchQuery_WorkMemIsTransactionLocal(t *testing.T) {
 	if after != before {
 		t.Fatalf("transaction-local work_mem leaked: before=%q after=%q", before, after)
 	}
-	var readOnlyAfter bool
+	var readOnlyAfter string
 	if err := conn.QueryRow(ctx, "SHOW transaction_read_only").Scan(&readOnlyAfter); err != nil {
 		t.Fatalf("read transaction_read_only after search: %v", err)
 	}
