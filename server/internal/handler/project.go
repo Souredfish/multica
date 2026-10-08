@@ -139,6 +139,15 @@ func (h *Handler) ListProjects(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	userID, ok := requireUserID(w, r)
+	if !ok {
+		return
+	}
+	visibility, ok := h.objectVisibilityForMember(r.Context(), workspaceID, userID)
+	if !ok {
+		writeError(w, http.StatusInternalServerError, "failed to resolve object visibility")
+		return
+	}
 	var statusFilter pgtype.Text
 	if s := r.URL.Query().Get("status"); s != "" {
 		statusFilter = pgtype.Text{String: s, Valid: true}
@@ -156,6 +165,13 @@ func (h *Handler) ListProjects(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "failed to list projects")
 		return
 	}
+	visibleProjects := projects[:0]
+	for _, project := range projects {
+		if h.canReadProject(r.Context(), visibility, project) {
+			visibleProjects = append(visibleProjects, project)
+		}
+	}
+	projects = visibleProjects
 
 	// Batch-fetch issue stats and resource counts for all projects
 	statsMap := make(map[string]db.GetProjectIssueStatsRow)
@@ -165,16 +181,11 @@ func (h *Handler) ListProjects(w http.ResponseWriter, r *http.Request) {
 		for i, p := range projects {
 			projectIDs[i] = p.ID
 		}
-		terminalStatusKeys := h.projectTerminalIssueStatusKeys(r.Context(), wsUUID)
-		stats, statsErr := h.Queries.GetProjectIssueStats(r.Context(), db.GetProjectIssueStatsParams{
-			WorkspaceID:        wsUUID,
-			ProjectIds:         projectIDs,
-			TerminalStatusKeys: terminalStatusKeys,
-		})
-		if statsErr == nil {
-			for _, s := range stats {
-				statsMap[uuidToString(s.ProjectID)] = s
-			}
+		var statsErr error
+		statsMap, statsErr = h.visibleProjectIssueStats(r.Context(), wsUUID, projectIDs, visibility)
+		if statsErr != nil {
+			writeError(w, http.StatusInternalServerError, "failed to resolve visible project stats")
+			return
 		}
 		counts, err := h.Queries.GetProjectResourceCounts(r.Context(), projectIDs)
 		if err == nil {
@@ -214,8 +225,28 @@ func (h *Handler) GetProject(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "project not found")
 		return
 	}
+	userID, ok := requireUserID(w, r)
+	if !ok {
+		return
+	}
+	visibility, ok := h.objectVisibilityForMember(r.Context(), workspaceID, userID)
+	if !ok {
+		writeError(w, http.StatusInternalServerError, "failed to resolve object visibility")
+		return
+	}
+	if !h.canReadProject(r.Context(), visibility, project) {
+		writeError(w, http.StatusNotFound, "project not found")
+		return
+	}
 	resp := projectToResponse(project)
-	resp.IssueCount, resp.DoneCount = h.loadProjectIssueStats(r.Context(), wsUUID, project.ID)
+	visibleStats, statsErr := h.visibleProjectIssueStats(r.Context(), wsUUID, []pgtype.UUID{project.ID}, visibility)
+	if statsErr != nil {
+		writeError(w, http.StatusInternalServerError, "failed to resolve visible project stats")
+		return
+	}
+	if stats, exists := visibleStats[resp.ID]; exists {
+		resp.IssueCount, resp.DoneCount = stats.TotalCount, stats.DoneCount
+	}
 	resp.ResourceCount = h.loadProjectResourceCount(r.Context(), project.ID)
 	writeJSON(w, http.StatusOK, resp)
 }
@@ -490,6 +521,15 @@ func (h *Handler) UpdateProject(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	visibility, ok := h.objectVisibilityForMember(r.Context(), workspaceID, userID)
+	if !ok {
+		writeError(w, http.StatusInternalServerError, "failed to resolve object visibility")
+		return
+	}
+	if !h.canReadProject(r.Context(), visibility, prevProject) {
+		writeError(w, http.StatusNotFound, "project not found")
+		return
+	}
 	bodyBytes, err := io.ReadAll(r.Body)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "failed to read request body")
@@ -591,7 +631,14 @@ func (h *Handler) UpdateProject(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	resp := projectToResponse(project)
-	resp.IssueCount, resp.DoneCount = h.loadProjectIssueStats(r.Context(), wsUUID, project.ID)
+	visibleStats, statsErr := h.visibleProjectIssueStats(r.Context(), wsUUID, []pgtype.UUID{project.ID}, visibility)
+	if statsErr != nil {
+		writeError(w, http.StatusInternalServerError, "failed to resolve visible project stats")
+		return
+	}
+	if stats, exists := visibleStats[resp.ID]; exists {
+		resp.IssueCount, resp.DoneCount = stats.TotalCount, stats.DoneCount
+	}
 	resp.ResourceCount = h.loadProjectResourceCount(r.Context(), project.ID)
 	h.publish(protocol.EventProjectUpdated, workspaceID, "member", userID, map[string]any{"project": resp})
 	writeJSON(w, http.StatusOK, resp)
@@ -617,6 +664,20 @@ func (h *Handler) DeleteProject(w http.ResponseWriter, r *http.Request) {
 	}
 	requester, ok := h.requireWorkspaceRole(w, r, uuidToString(project.WorkspaceID), "project not found", "owner", "admin")
 	if !ok {
+		return
+	}
+	visibility, ok := h.objectVisibilityForMember(r.Context(), workspaceID, uuidToString(requester.UserID))
+	if !ok {
+		writeError(w, http.StatusInternalServerError, "failed to resolve object visibility")
+		return
+	}
+	if !h.canReadProject(r.Context(), visibility, project) {
+		writeError(w, http.StatusNotFound, "project not found")
+		return
+	}
+	deleteRecipients, err := h.BusinessObjectRecipients(r.Context(), workspaceID, "project", uuidToString(project.ID))
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to resolve project event recipients")
 		return
 	}
 	userID := uuidToString(requester.UserID)
@@ -666,7 +727,7 @@ func (h *Handler) DeleteProject(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "failed to commit project delete")
 		return
 	}
-	h.publish(protocol.EventProjectDeleted, workspaceID, "member", userID, map[string]any{"project_id": uuidToString(project.ID)})
+	h.publishWithRecipients(protocol.EventProjectDeleted, workspaceID, "member", userID, map[string]any{"project_id": uuidToString(project.ID)}, deleteRecipients)
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -678,7 +739,7 @@ type SearchProjectResponse struct {
 }
 
 // buildProjectSearchQuery builds a dynamic SQL query for project search.
-func buildProjectSearchQuery(phrase string, terms []string, includeClosed bool) (string, []any) {
+func buildProjectSearchQuery(phrase string, terms []string, includeClosed bool, visibilityScopes ...objectVisibility) (string, []any) {
 	phrase = strings.ToLower(phrase)
 	for i, t := range terms {
 		terms[i] = strings.ToLower(t)
@@ -735,6 +796,9 @@ func buildProjectSearchQuery(phrase string, terms []string, includeClosed bool) 
 
 	if !includeClosed {
 		whereClause += " AND p.status NOT IN ('completed', 'cancelled')"
+	}
+	if len(visibilityScopes) > 0 {
+		whereClause += " AND " + visibilityScopes[0].projectVisibilityPredicate("p", nextArg)
 	}
 
 	// --- ORDER BY ranking ---
@@ -850,9 +914,18 @@ func (h *Handler) SearchProjects(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	userID, ok := requireUserID(w, r)
+	if !ok {
+		return
+	}
+	visibility, ok := h.objectVisibilityForMember(ctx, workspaceID, userID)
+	if !ok {
+		writeError(w, http.StatusInternalServerError, "failed to resolve object visibility")
+		return
+	}
 	terms := splitSearchTerms(q)
 
-	sqlQuery, args := buildProjectSearchQuery(q, terms, includeClosed)
+	sqlQuery, args := buildProjectSearchQuery(q, terms, includeClosed, visibility)
 	args[1] = wsUUID
 	args[len(args)-2] = limit
 	args[len(args)-1] = offset
@@ -903,6 +976,14 @@ func (h *Handler) SearchProjects(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "failed to search projects")
 		return
 	}
+	if visibility.rescue {
+		for _, row := range results {
+			if !h.auditRescueObject(ctx, visibility, "project", row.project.ID, "search") {
+				writeError(w, http.StatusInternalServerError, "failed to record rescue access")
+				return
+			}
+		}
+	}
 
 	// Batch-fetch issue stats and resource counts
 	statsMap := make(map[string]db.GetProjectIssueStatsRow)
@@ -912,16 +993,11 @@ func (h *Handler) SearchProjects(w http.ResponseWriter, r *http.Request) {
 		for i, r := range results {
 			projectIDs[i] = r.project.ID
 		}
-		terminalStatusKeys := h.projectTerminalIssueStatusKeys(ctx, wsUUID)
-		stats, statsErr := h.Queries.GetProjectIssueStats(ctx, db.GetProjectIssueStatsParams{
-			WorkspaceID:        wsUUID,
-			ProjectIds:         projectIDs,
-			TerminalStatusKeys: terminalStatusKeys,
-		})
-		if statsErr == nil {
-			for _, s := range stats {
-				statsMap[uuidToString(s.ProjectID)] = s
-			}
+		var statsErr error
+		statsMap, statsErr = h.visibleProjectIssueStats(ctx, wsUUID, projectIDs, visibility)
+		if statsErr != nil {
+			writeError(w, http.StatusInternalServerError, "failed to resolve visible project stats")
+			return
 		}
 		counts, err := h.Queries.GetProjectResourceCounts(ctx, projectIDs)
 		if err == nil {

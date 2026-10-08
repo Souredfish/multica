@@ -14,6 +14,7 @@ import (
 const archiveAllInbox = `-- name: ArchiveAllInbox :execrows
 UPDATE inbox_item SET archived = true
 WHERE workspace_id = $1 AND recipient_type = 'member' AND recipient_id = $2 AND archived = false
+  AND (issue_id IS NULL OR can_member_read_issue(workspace_id, issue_id, recipient_id))
 `
 
 type ArchiveAllInboxParams struct {
@@ -39,6 +40,7 @@ WITH newest_groups AS (
       AND i.recipient_type = 'member'
       AND i.recipient_id = $2
       AND i.archived = false
+      AND (i.issue_id IS NULL OR can_member_read_issue(i.workspace_id, i.issue_id, i.recipient_id))
     ORDER BY COALESCE(i.issue_id, i.id), i.created_at DESC, i.id DESC
 ), read_groups AS (
     SELECT group_id
@@ -75,9 +77,11 @@ func (q *Queries) ArchiveAllReadInbox(ctx context.Context, arg ArchiveAllReadInb
 const archiveCompletedInbox = `-- name: ArchiveCompletedInbox :execrows
 UPDATE inbox_item i SET archived = true
 WHERE i.workspace_id = $1 AND i.recipient_type = 'member' AND i.recipient_id = $2 AND i.archived = false
+  AND (i.issue_id IS NULL OR can_member_read_issue(i.workspace_id, i.issue_id, i.recipient_id))
   AND i.issue_id IN (
     SELECT id FROM issue
     WHERE workspace_id = $1
+      AND can_member_read_issue(workspace_id, id, $2)
       AND status = ANY($3::text[])
   )
 `
@@ -188,8 +192,9 @@ func (q *Queries) ArchiveInboxItem(ctx context.Context, id pgtype.UUID) (InboxIt
 }
 
 const countUnreadInbox = `-- name: CountUnreadInbox :one
-SELECT count(*) FROM inbox_item
-WHERE workspace_id = $1 AND recipient_type = $2 AND recipient_id = $3 AND read = false AND archived = false
+SELECT count(*) FROM inbox_item i
+WHERE i.workspace_id = $1 AND i.recipient_type = $2 AND i.recipient_id = $3 AND i.read = false AND i.archived = false
+  AND (i.issue_id IS NULL OR can_member_read_issue(i.workspace_id, i.issue_id, i.recipient_id))
 `
 
 type CountUnreadInboxParams struct {
@@ -215,6 +220,7 @@ FROM (
     WHERE i.recipient_type = 'member'
       AND i.recipient_id = $1
       AND i.archived = false
+      AND (i.issue_id IS NULL OR can_member_read_issue(i.workspace_id, i.issue_id, i.recipient_id))
     ORDER BY i.workspace_id, COALESCE(i.issue_id, i.id), i.created_at DESC
 ) newest
 WHERE newest.read = false
@@ -388,6 +394,7 @@ WITH eligible_archived AS MATERIALIZED (
       AND i.recipient_type = $2
       AND i.recipient_id = $3
       AND i.archived = true
+      AND (i.issue_id IS NULL OR can_member_read_issue(i.workspace_id, i.issue_id, i.recipient_id))
       AND (i.issue_id IS NULL OR NOT EXISTS (
           SELECT 1
           FROM inbox_item active
@@ -523,6 +530,7 @@ SELECT i.id, i.workspace_id, i.recipient_type, i.recipient_id, i.type, i.severit
 FROM inbox_item i
 LEFT JOIN issue iss ON iss.id = i.issue_id
 WHERE i.workspace_id = $1 AND i.recipient_type = $2 AND i.recipient_id = $3 AND i.archived = false
+  AND (i.issue_id IS NULL OR can_member_read_issue(i.workspace_id, i.issue_id, i.recipient_id))
 ORDER BY i.created_at DESC
 `
 
@@ -593,6 +601,7 @@ func (q *Queries) ListInboxItems(ctx context.Context, arg ListInboxItemsParams) 
 const markAllInboxRead = `-- name: MarkAllInboxRead :execrows
 UPDATE inbox_item SET read = true
 WHERE workspace_id = $1 AND recipient_type = 'member' AND recipient_id = $2 AND archived = false AND read = false
+  AND (issue_id IS NULL OR can_member_read_issue(workspace_id, issue_id, recipient_id))
 `
 
 type MarkAllInboxReadParams struct {

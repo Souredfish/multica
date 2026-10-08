@@ -522,6 +522,19 @@ func (h *Handler) loadProjectForResource(w http.ResponseWriter, r *http.Request,
 		writeError(w, http.StatusNotFound, "project not found")
 		return db.Project{}, false
 	}
+	userID, ok := requireUserID(w, r)
+	if !ok {
+		return db.Project{}, false
+	}
+	visibility, ok := h.objectVisibilityForMember(r.Context(), uuidToString(wsUUID), userID)
+	if !ok {
+		writeError(w, http.StatusInternalServerError, "failed to resolve object visibility")
+		return db.Project{}, false
+	}
+	if !h.canReadProject(r.Context(), visibility, project) {
+		writeError(w, http.StatusNotFound, "project not found")
+		return db.Project{}, false
+	}
 	return project, true
 }
 

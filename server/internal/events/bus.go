@@ -12,6 +12,9 @@ type Event struct {
 	ActorType   string // "member", "agent", or "system"
 	ActorID     string
 	Payload     any // JSON-serializable, same shape as current WS payloads
+	// RecipientIDs is an optional precomputed audience for events whose object
+	// has already been deleted and can no longer be authorized from the DB.
+	RecipientIDs []string
 
 	// Optional scope hints used by the realtime fanout layer to route the
 	// event to a more specific scope than `workspace:{WorkspaceID}`. When set

@@ -141,6 +141,19 @@ func (h *Handler) ListArchivedInboxPage(w http.ResponseWriter, r *http.Request) 
 		writeError(w, http.StatusInternalServerError, "failed to load archived inbox page")
 		return
 	}
+	visibility, ok := h.objectVisibilityForMember(r.Context(), uuidToString(filters.WorkspaceID), uuidToString(filters.RecipientID))
+	if !ok {
+		writeError(w, http.StatusInternalServerError, "failed to resolve object visibility")
+		return
+	}
+	if visibility.rescue {
+		for _, row := range rows {
+			if row.InboxItem.IssueID.Valid && !h.auditRescueObject(r.Context(), visibility, "issue", row.InboxItem.IssueID, "inbox_archive_read") {
+				writeError(w, http.StatusInternalServerError, "failed to record rescue access")
+				return
+			}
+		}
+	}
 	resp := archivedInboxPageResponse{Items: make([]InboxItemResponse, 0, limit), HasMore: len(rows) > limit}
 	if resp.HasMore {
 		rows = rows[:limit]
@@ -180,6 +193,17 @@ func (h *Handler) GetArchivedInboxFacets(w http.ResponseWriter, r *http.Request)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to load archived inbox filters")
 		return
+	}
+	visibility, ok := h.objectVisibilityForMember(r.Context(), uuidToString(p.WorkspaceID), uuidToString(p.RecipientID))
+	if !ok {
+		writeError(w, http.StatusInternalServerError, "failed to resolve object visibility")
+		return
+	}
+	if visibility.rescue {
+		if err := h.auditInboxRescue(r.Context(), visibility, p.WorkspaceID, p.RecipientID, true, false); err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to record rescue access")
+			return
+		}
 	}
 	resp := archivedInboxFacetsResponse{Statuses: map[string]int64{}, Priorities: map[string]int64{}, Actors: map[string]int64{}}
 	for _, row := range rows {

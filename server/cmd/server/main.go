@@ -22,6 +22,7 @@ import (
 	"github.com/multica-ai/multica/server/internal/dbstartup"
 	"github.com/multica-ai/multica/server/internal/events"
 	"github.com/multica-ai/multica/server/internal/handler"
+	"github.com/multica-ai/multica/server/internal/util"
 	"github.com/multica-ai/multica/server/internal/integrations/wecom"
 	"github.com/multica-ai/multica/server/internal/logger"
 	"github.com/multica-ai/multica/server/internal/maintenance"
@@ -602,13 +603,41 @@ func main() {
 			channelLeaseRedis = newNamedRedisClient(opts, "channel-lease")
 		}
 	}
-	registerListeners(bus, broadcaster)
-
 	analyticsClient := analytics.NewFromEnv()
 	defer analyticsClient.Close()
 
 	queries := db.New(pool)
 	hub.SetAuthorizer(newScopeAuthorizer(queries))
+	visibilityGate := &handler.Handler{Queries: queries, DB: pool}
+	resolveEventAudience := func(ctx context.Context, e events.Event) ([]string, bool) {
+		objectType, objectID, scoped := eventObjectReference(e)
+		if !scoped {
+			return nil, false
+		}
+		if objectType == "task" {
+			taskID, err := util.ParseUUID(objectID)
+			if err != nil {
+				return nil, true
+			}
+			task, err := queries.GetAgentTask(ctx, taskID)
+			if err != nil {
+				return nil, true
+			}
+			if !task.IssueID.Valid {
+				// Standalone tasks do not yet have a business-object audience
+				// resolver. Keep them scoped and fail closed instead of falling
+				// back to workspace-wide delivery.
+				return nil, true
+			}
+			objectType, objectID = "issue", util.UUIDToString(task.IssueID)
+		}
+		audience, err := visibilityGate.BusinessObjectRecipients(ctx, e.WorkspaceID, objectType, objectID)
+		if err != nil {
+			return nil, true
+		}
+		return audience, true
+	}
+	registerListeners(bus, broadcaster, resolveEventAudience)
 	// Order matters: subscriber listeners must register BEFORE notification listeners.
 	// The notification listener queries the subscriber table to determine recipients,
 	// so subscribers must be written first within the same synchronous event dispatch.

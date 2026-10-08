@@ -3,6 +3,7 @@ package handler
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"log/slog"
 	"net/http"
 
@@ -31,6 +32,40 @@ type InboxItemResponse struct {
 	ActorType     *string         `json:"actor_type"`
 	ActorID       *string         `json:"actor_id"`
 	Details       json.RawMessage `json:"details"`
+}
+
+func (h *Handler) auditInboxRescue(ctx context.Context, scope objectVisibility, workspaceID, userID pgtype.UUID, archived, unreadOnly bool) error {
+	if !scope.rescue {
+		return nil
+	}
+	rows, err := h.DB.Query(ctx, `SELECT DISTINCT i.issue_id
+FROM inbox_item i
+WHERE i.workspace_id = $1 AND i.recipient_type = 'member' AND i.recipient_id = $2
+  AND i.archived = $3 AND (NOT $4 OR i.read = false)
+  AND i.issue_id IS NOT NULL AND can_member_read_issue(i.workspace_id, i.issue_id, i.recipient_id)`, workspaceID, userID, archived, unreadOnly)
+	if err != nil {
+		return err
+	}
+	issueIDs := make([]pgtype.UUID, 0)
+	for rows.Next() {
+		var issueID pgtype.UUID
+		if err := rows.Scan(&issueID); err != nil {
+			rows.Close()
+			return err
+		}
+		issueIDs = append(issueIDs, issueID)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return err
+	}
+	rows.Close()
+	for _, issueID := range issueIDs {
+		if !h.auditRescueObject(ctx, scope, "issue", issueID, "inbox_read") {
+			return fmt.Errorf("record rescue audit")
+		}
+	}
+	return nil
 }
 
 func inboxToResponse(i db.InboxItem) InboxItemResponse {
@@ -173,6 +208,15 @@ func (h *Handler) ListInbox(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "failed to list inbox")
 		return
 	}
+	visibility, ok := h.objectVisibilityForMember(r.Context(), workspaceID, userID)
+	if !ok {
+		writeError(w, http.StatusInternalServerError, "failed to resolve object visibility")
+		return
+	}
+	if err := h.auditInboxRescue(r.Context(), visibility, wsUUID, parseUUID(userID), false, false); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to record rescue access")
+		return
+	}
 
 	resp := make([]InboxItemResponse, len(items))
 	for i, item := range items {
@@ -209,6 +253,15 @@ func (h *Handler) ListArchivedInbox(w http.ResponseWriter, r *http.Request) {
 	})
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to list archived inbox")
+		return
+	}
+	visibility, ok := h.objectVisibilityForMember(r.Context(), workspaceID, userID)
+	if !ok {
+		writeError(w, http.StatusInternalServerError, "failed to resolve object visibility")
+		return
+	}
+	if err := h.auditInboxRescue(r.Context(), visibility, wsUUID, parseUUID(userID), true, false); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to record rescue access")
 		return
 	}
 
@@ -358,6 +411,15 @@ func (h *Handler) CountUnreadInbox(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	visibility, ok := h.objectVisibilityForMember(r.Context(), workspaceID, userID)
+	if !ok {
+		writeError(w, http.StatusInternalServerError, "failed to resolve object visibility")
+		return
+	}
+	if err := h.auditInboxRescue(r.Context(), visibility, wsUUID, parseUUID(userID), false, true); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to record rescue access")
+		return
+	}
 
 	count, err := h.Queries.CountUnreadInbox(r.Context(), db.CountUnreadInboxParams{
 		WorkspaceID:   wsUUID,
@@ -395,6 +457,18 @@ func (h *Handler) UnreadInboxSummary(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to summarize unread inbox")
 		return
+	}
+	for _, row := range rows {
+		workspaceID := uuidToString(row.WorkspaceID)
+		visibility, ok := h.objectVisibilityForMember(r.Context(), workspaceID, userID)
+		if !ok {
+			writeError(w, http.StatusInternalServerError, "failed to resolve object visibility")
+			return
+		}
+		if err := h.auditInboxRescue(r.Context(), visibility, row.WorkspaceID, parseUUID(userID), false, true); err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to record rescue access")
+			return
+		}
 	}
 
 	resp := make([]InboxWorkspaceUnreadResponse, len(rows))

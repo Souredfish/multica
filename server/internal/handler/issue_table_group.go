@@ -921,6 +921,9 @@ func (h *Handler) ListIssueTableGroups(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	if !h.auditIssueTableRescue(w, r, compiled) {
+		return
+	}
 	group, ok := h.resolveIssueTableGroup(w, r, compiled.workspaceID, request.Group, false)
 	if !ok {
 		return

@@ -755,6 +755,28 @@ func (h *Handler) publish(eventType, workspaceID, actorType, actorID string, pay
 	})
 }
 
+func (h *Handler) publishWithRecipients(eventType, workspaceID, actorType, actorID string, payload any, recipients []string) {
+	h.Bus.Publish(events.Event{
+		Type:         eventType,
+		WorkspaceID:  workspaceID,
+		ActorType:    actorType,
+		ActorID:      actorID,
+		Payload:      payload,
+		RecipientIDs: recipients,
+	})
+}
+
+func (h *Handler) publishDeletedIssue(ctx context.Context, issue db.Issue, actorType, actorID string) {
+	h.Bus.Publish(events.Event{
+		Type:         protocol.EventIssueDeleted,
+		WorkspaceID:  uuidToString(issue.WorkspaceID),
+		ActorType:    actorType,
+		ActorID:      actorID,
+		Payload:      map[string]any{"issue_id": uuidToString(issue.ID)},
+		RecipientIDs: h.issueEventRecipients(ctx, issue),
+	})
+}
+
 func (h *Handler) notifyDaemonWorkspacesChanged(userIDs ...string) {
 	if h.DaemonWorkspaceRefresh == nil {
 		return
@@ -1058,6 +1080,12 @@ func (h *Handler) loadIssueForUser(w http.ResponseWriter, r *http.Request, issue
 	// silently returns false for non-identifier strings, falling through to
 	// the UUID path below.
 	if issue, ok := h.resolveIssueByIdentifier(r.Context(), issueID, workspaceID); ok {
+		userID := requestUserID(r)
+		scope, scopeOK := h.objectVisibilityForMember(r.Context(), workspaceID, userID)
+		if !scopeOK || !h.canReadIssue(r.Context(), scope, issue) {
+			writeError(w, http.StatusNotFound, "issue not found")
+			return db.Issue{}, false
+		}
 		return issue, true
 	}
 
@@ -1078,6 +1106,12 @@ func (h *Handler) loadIssueForUser(w http.ResponseWriter, r *http.Request, issue
 		WorkspaceID: wsUUID,
 	})
 	if err != nil {
+		writeError(w, http.StatusNotFound, "issue not found")
+		return db.Issue{}, false
+	}
+	userID := requestUserID(r)
+	scope, scopeOK := h.objectVisibilityForMember(r.Context(), workspaceID, userID)
+	if !scopeOK || !h.canReadIssue(r.Context(), scope, issue) {
 		writeError(w, http.StatusNotFound, "issue not found")
 		return db.Issue{}, false
 	}
@@ -1251,6 +1285,11 @@ func (h *Handler) loadInboxItemForUser(w http.ResponseWriter, r *http.Request, i
 	if item.RecipientType != "member" || uuidToString(item.RecipientID) != userID {
 		writeError(w, http.StatusNotFound, "inbox item not found")
 		return db.InboxItem{}, false
+	}
+	if item.IssueID.Valid {
+		if _, ok := h.loadIssueForUser(w, r, uuidToString(item.IssueID)); !ok {
+			return db.InboxItem{}, false
+		}
 	}
 	return item, true
 }

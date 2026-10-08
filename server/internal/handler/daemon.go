@@ -5615,6 +5615,7 @@ func (h *Handler) ListTasksByIssue(w http.ResponseWriter, r *http.Request) {
 		rows, err := h.Queries.ListActiveTasksByIssueFamily(r.Context(), db.ListActiveTasksByIssueFamilyParams{
 			WorkspaceID: issue.WorkspaceID,
 			RootIssueID: root,
+			UserID:      parseUUID(requestUserID(r)),
 			RowLimit:    familyActiveRunCap + 1,
 		})
 		if err != nil {
@@ -5624,6 +5625,19 @@ func (h *Handler) ListTasksByIssue(w http.ResponseWriter, r *http.Request) {
 		if len(rows) > familyActiveRunCap {
 			rows = rows[:familyActiveRunCap]
 			w.Header().Set(HeaderActiveRunsTruncated, "true")
+		}
+		visibility, ok := h.objectVisibilityForMember(r.Context(), workspaceID, requestUserID(r))
+		if !ok {
+			writeError(w, http.StatusInternalServerError, "failed to resolve object visibility")
+			return
+		}
+		if visibility.rescue {
+			for _, row := range rows {
+				if !h.auditRescueObject(r.Context(), visibility, "issue", row.IssueID, "daemon_family_summary") {
+					writeError(w, http.StatusInternalServerError, "failed to record rescue access")
+					return
+				}
+			}
 		}
 		summaries := make([]ActiveRunSummary, len(rows))
 		for i, row := range rows {
@@ -5809,6 +5823,11 @@ func (h *Handler) ListTaskMessagesByUser(w http.ResponseWriter, r *http.Request)
 	if wsID == "" || wsID != middleware.WorkspaceIDFromContext(r.Context()) {
 		writeError(w, http.StatusNotFound, "task not found")
 		return
+	}
+	if task.IssueID.Valid {
+		if _, ok := h.loadIssueForUser(w, r, uuidToString(task.IssueID)); !ok {
+			return
+		}
 	}
 
 	var (

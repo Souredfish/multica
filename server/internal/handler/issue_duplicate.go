@@ -142,6 +142,11 @@ func (h *Handler) ListIssueDuplicates(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	visibility, ok := h.objectVisibilityForMember(r.Context(), uuidToString(issue.WorkspaceID), requestUserID(r))
+	if !ok {
+		writeError(w, http.StatusInternalServerError, "failed to resolve object visibility")
+		return
+	}
 	prefix := h.getIssuePrefix(r.Context(), issue.WorkspaceID)
 	fill := h.newStatusCategoryFiller(r.Context(), issue.WorkspaceID)
 
@@ -152,7 +157,7 @@ func (h *Handler) ListIssueDuplicates(w http.ResponseWriter, r *http.Request) {
 			WorkspaceID: issue.WorkspaceID,
 		})
 		switch {
-		case err == nil:
+		case err == nil && h.canReadIssue(r.Context(), visibility, original):
 			resp := issueToResponse(original, prefix)
 			fill(&resp)
 			duplicateOf = &resp
@@ -174,6 +179,9 @@ func (h *Handler) ListIssueDuplicates(w http.ResponseWriter, r *http.Request) {
 	}
 	duplicates := make([]IssueResponse, 0, len(rows))
 	for _, row := range rows {
+		if !h.canReadIssue(r.Context(), visibility, row) {
+			continue
+		}
 		resp := issueToResponse(row, prefix)
 		fill(&resp)
 		duplicates = append(duplicates, resp)

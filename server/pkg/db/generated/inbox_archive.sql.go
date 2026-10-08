@@ -22,6 +22,7 @@ WITH newest AS MATERIALIZED (
       AND i.recipient_type = 'member'
       AND i.recipient_id = $2::uuid
       AND i.archived = true
+      AND (i.issue_id IS NULL OR can_member_read_issue(i.workspace_id, i.issue_id, i.recipient_id))
       AND (i.issue_id IS NULL OR NOT EXISTS (
           SELECT 1 FROM inbox_item active
           WHERE active.workspace_id = i.workspace_id
@@ -114,6 +115,7 @@ WITH newest AS MATERIALIZED (
       AND i.recipient_type = 'member'
       AND i.recipient_id = $2::uuid
       AND i.archived = true
+      AND (i.issue_id IS NULL OR can_member_read_issue(i.workspace_id, i.issue_id, i.recipient_id))
       AND ($3::uuid IS NULL OR i.issue_id = $3::uuid
            OR (i.issue_id IS NULL AND i.id = $3::uuid))
       AND (i.issue_id IS NULL OR NOT EXISTS (

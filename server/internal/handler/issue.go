@@ -22,6 +22,7 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/multica-ai/multica/server/internal/channelmedia"
 	"github.com/multica-ai/multica/server/internal/dispatch"
+	"github.com/multica-ai/multica/server/internal/events"
 	"github.com/multica-ai/multica/server/internal/issueguard"
 	"github.com/multica-ai/multica/server/internal/issuestatus"
 	"github.com/multica-ai/multica/server/internal/logger"
@@ -806,7 +807,7 @@ type searchResult struct {
 // case-insensitive LIKE semantics as the legacy query. The pipeline deliberately
 // trades the title, description, and comment content GIN fast paths for one
 // predictable pass over each relation within the selected workspace.
-func buildSearchQuery(phrase string, terms []string, queryNum int, hasNum bool, includeClosed bool, terminalStatusKeys []string) (string, []any) {
+func buildSearchQuery(phrase string, terms []string, queryNum int, hasNum bool, includeClosed bool, terminalStatusKeys []string, visibilityScopes ...objectVisibility) (string, []any) {
 	// Lowercase in Go so SQL only needs LOWER() on the column side.
 	phrase = strings.ToLower(phrase)
 	for i, term := range terms {
@@ -846,6 +847,10 @@ func buildSearchQuery(phrase string, terms []string, queryNum int, hasNum bool, 
 
 	limitParam := nextArg(nil)
 	offsetParam := nextArg(nil)
+	visibilityPredicate := "TRUE"
+	if len(visibilityScopes) > 0 {
+		visibilityPredicate = visibilityScopes[0].issueVisibilityPredicate("i", nextArg)
+	}
 
 	// Stage one scans this workspace's issues once and retains only the narrow
 	// flags and sort fields needed to choose a page. Do not force this CTE to be
@@ -885,7 +890,7 @@ func buildSearchQuery(phrase string, terms []string, queryNum int, hasNum bool, 
 		)
 	}
 
-	issueWhere := "i.workspace_id = " + wsParam
+	issueWhere := "i.workspace_id = " + wsParam + " AND " + visibilityPredicate
 	if terminalStatusesParam != "" {
 		issueWhere += fmt.Sprintf(" AND NOT (i.status = ANY(%s::text[]))", terminalStatusesParam)
 	}
@@ -1150,6 +1155,15 @@ func (h *Handler) SearchIssues(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	userID, ok := requireUserID(w, r)
+	if !ok {
+		return
+	}
+	visibility, ok := h.objectVisibilityForMember(ctx, workspaceID, userID)
+	if !ok {
+		writeError(w, http.StatusInternalServerError, "failed to resolve object visibility")
+		return
+	}
 	terms := splitSearchTerms(q)
 	queryNum, hasNum := parseQueryNumber(q)
 	var terminalStatusKeys []string
@@ -1163,11 +1177,11 @@ func (h *Handler) SearchIssues(w http.ResponseWriter, r *http.Request) {
 		terminalStatusKeys = resolvedKeys
 	}
 
-	sqlQuery, args := buildSearchQuery(q, terms, queryNum, hasNum, includeClosed, terminalStatusKeys)
+	sqlQuery, args := buildSearchQuery(q, terms, queryNum, hasNum, includeClosed, terminalStatusKeys, visibility)
 	// Fill placeholder args: $4 = workspace_id, last two = limit, offset
 	args[3] = wsUUID
-	args[len(args)-2] = limit
-	args[len(args)-1] = offset
+	args[len(args)-5] = limit
+	args[len(args)-4] = offset
 
 	var results []searchResult
 	err := runSearchQuery(ctx, h.TxStarter, sqlQuery, args, func(rows pgx.Rows) error {
@@ -1225,6 +1239,14 @@ func (h *Handler) SearchIssues(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if visibility.rescue {
+		for _, result := range results {
+			if !h.auditRescueObject(ctx, visibility, "issue", result.issue.ID, "search") {
+				writeError(w, http.StatusInternalServerError, "failed to record rescue access")
+				return
+			}
+		}
+	}
 	prefix := h.getIssuePrefix(ctx, wsUUID)
 	var originals []pgtype.UUID
 	for _, sr := range results {
@@ -1288,6 +1310,15 @@ func (h *Handler) ListIssues(w http.ResponseWriter, r *http.Request) {
 	workspaceID := h.resolveWorkspaceID(r)
 	wsUUID, ok := parseUUIDOrBadRequest(w, workspaceID, "workspace_id")
 	if !ok {
+		return
+	}
+	userID, ok := requireUserID(w, r)
+	if !ok {
+		return
+	}
+	visibility, ok := h.objectVisibilityForMember(ctx, workspaceID, userID)
+	if !ok {
+		writeError(w, http.StatusInternalServerError, "failed to resolve object visibility")
 		return
 	}
 
@@ -1395,7 +1426,16 @@ func (h *Handler) ListIssues(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusInternalServerError, "failed to list issues")
 			return
 		}
-
+		visibleIssues := issues[:0]
+		for _, issue := range issues {
+			if h.canReadIssue(ctx, visibility, db.Issue{
+				ID: issue.ID, CreatorType: issue.CreatorType, CreatorID: issue.CreatorID,
+				AssigneeType: issue.AssigneeType, AssigneeID: issue.AssigneeID,
+			}) {
+				visibleIssues = append(visibleIssues, issue)
+			}
+		}
+		issues = visibleIssues
 		prefix := h.getIssuePrefix(ctx, wsUUID)
 		ids := make([]pgtype.UUID, len(issues))
 		var originals []pgtype.UUID
@@ -1547,6 +1587,7 @@ func (h *Handler) ListIssues(w http.ResponseWriter, r *http.Request) {
 		args = append(args, v)
 		return "$" + strconv.Itoa(len(args))
 	}
+	where = append(where, visibility.issueVisibilityPredicate("i", addArg))
 	if len(statusCategoriesFilter) > 0 {
 		// Expanded to concrete status keys rather than filtered through
 		// issue_effective_status(): wrapping the column in a function makes the
@@ -1804,6 +1845,14 @@ LIMIT %s OFFSET %s`, whereSql, orderBy, limitRef, offsetRef)
 		writeError(w, http.StatusInternalServerError, "failed to list issues")
 		return
 	}
+	if visibility.rescue {
+		for _, issue := range issues {
+			if !h.auditRescueObject(ctx, visibility, "issue", issue.ID, "list") {
+				writeError(w, http.StatusInternalServerError, "failed to record rescue access")
+				return
+			}
+		}
+	}
 
 	// Get the true total count for pagination awareness.
 	countQuery := fmt.Sprintf(`SELECT COUNT(*) FROM issue i WHERE %s`, whereSql)
@@ -2000,7 +2049,6 @@ func (h *Handler) ListGroupedIssues(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "database is unavailable")
 		return
 	}
-
 	groupBy := r.URL.Query().Get("group_by")
 	if groupBy == "" {
 		groupBy = "assignee"
@@ -2013,6 +2061,15 @@ func (h *Handler) ListGroupedIssues(w http.ResponseWriter, r *http.Request) {
 	workspaceID := h.resolveWorkspaceID(r)
 	wsUUID, ok := parseUUIDOrBadRequest(w, workspaceID, "workspace_id")
 	if !ok {
+		return
+	}
+	userID, ok := requireUserID(w, r)
+	if !ok {
+		return
+	}
+	visibility, ok := h.objectVisibilityForMember(ctx, workspaceID, userID)
+	if !ok {
+		writeError(w, http.StatusInternalServerError, "failed to resolve object visibility")
 		return
 	}
 
@@ -2038,6 +2095,7 @@ func (h *Handler) ListGroupedIssues(w http.ResponseWriter, r *http.Request) {
 		args = append(args, v)
 		return "$" + strconv.Itoa(len(args))
 	}
+	where = append(where, visibility.issueVisibilityPredicate("i", addArg))
 
 	statuses := splitCommaParam(r.URL.Query().Get("statuses"))
 	if len(statuses) == 0 {
@@ -2421,6 +2479,14 @@ ORDER BY
 		}
 		groupedRows = append(groupedRows, row)
 	}
+	if visibility.rescue {
+		for _, row := range groupedRows {
+			if !h.auditRescueObject(ctx, visibility, "issue", row.ID, "grouped_list") {
+				writeError(w, http.StatusInternalServerError, "failed to record rescue access")
+				return
+			}
+		}
+	}
 	if err := rows.Err(); err != nil {
 		slog.Warn("ListGroupedIssues rows failed", "error", err)
 		writeError(w, http.StatusInternalServerError, "failed to list grouped issues")
@@ -2531,6 +2597,23 @@ func (h *Handler) ListChildIssues(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "failed to list child issues")
 		return
 	}
+	userID := requestUserID(r)
+	visibility, ok := h.objectVisibilityForMember(r.Context(), uuidToString(issue.WorkspaceID), userID)
+	if !ok {
+		writeError(w, http.StatusInternalServerError, "failed to resolve object visibility")
+		return
+	}
+	visibleChildren := children[:0]
+	for _, child := range children {
+		if !h.canReadIssue(r.Context(), visibility, child) || !child.ParentIssueID.Valid {
+			continue
+		}
+		parent, err := h.Queries.GetIssueInWorkspace(r.Context(), db.GetIssueInWorkspaceParams{ID: child.ParentIssueID, WorkspaceID: wsUUID})
+		if err == nil && h.canReadIssue(r.Context(), visibility, parent) {
+			visibleChildren = append(visibleChildren, child)
+		}
+	}
+	children = visibleChildren
 	prefix := h.getIssuePrefix(r.Context(), issue.WorkspaceID)
 	ids := make([]pgtype.UUID, len(children))
 	for i, child := range children {
@@ -2577,6 +2660,15 @@ func (h *Handler) ListChildrenByParents(w http.ResponseWriter, r *http.Request) 
 	if !ok {
 		return
 	}
+	userID, ok := requireUserID(w, r)
+	if !ok {
+		return
+	}
+	visibility, ok := h.objectVisibilityForMember(r.Context(), workspaceID, userID)
+	if !ok {
+		writeError(w, http.StatusInternalServerError, "failed to resolve object visibility")
+		return
+	}
 
 	raw := r.URL.Query().Get("parent_ids")
 	if raw == "" {
@@ -2617,6 +2709,13 @@ func (h *Handler) ListChildrenByParents(w http.ResponseWriter, r *http.Request) 
 		writeError(w, http.StatusInternalServerError, "failed to list child issues")
 		return
 	}
+	visibleChildren := children[:0]
+	for _, child := range children {
+		if h.canReadIssue(r.Context(), visibility, child) {
+			visibleChildren = append(visibleChildren, child)
+		}
+	}
+	children = visibleChildren
 	prefix := h.getIssuePrefix(r.Context(), wsUUID)
 	ids := make([]pgtype.UUID, len(children))
 	for i, child := range children {
@@ -2650,16 +2749,36 @@ func (h *Handler) ChildIssueProgress(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	userID, ok := requireUserID(w, r)
+	if !ok {
+		return
+	}
+	visibility, ok := h.objectVisibilityForMember(r.Context(), wsID, userID)
+	if !ok {
+		writeError(w, http.StatusInternalServerError, "failed to resolve object visibility")
+		return
+	}
 
 	terminalStatusKeys, err := h.terminalIssueStatusKeys(r.Context(), wsUUID)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to resolve status categories")
 		return
 	}
-	rows, err := h.Queries.ChildIssueProgress(r.Context(), db.ChildIssueProgressParams{
-		WorkspaceID:        wsUUID,
-		TerminalStatusKeys: terminalStatusKeys,
-	})
+	args := []any{wsUUID, terminalStatusKeys}
+	addArg := func(value any) string {
+		args = append(args, value)
+		return fmt.Sprintf("$%d", len(args))
+	}
+	childPredicate := visibility.issueVisibilityPredicate("child", addArg)
+	parentPredicate := visibility.issueVisibilityPredicate("parent", addArg)
+	rows, err := h.DB.Query(r.Context(), `SELECT child.parent_issue_id,
+       COUNT(*)::bigint AS total,
+       COUNT(*) FILTER (WHERE child.status = ANY($2::text[]))::bigint AS done
+FROM issue child
+JOIN issue parent ON parent.id = child.parent_issue_id AND parent.workspace_id = child.workspace_id
+WHERE child.workspace_id = $1 AND child.parent_issue_id IS NOT NULL
+  AND `+childPredicate+` AND `+parentPredicate+`
+GROUP BY child.parent_issue_id`, args...)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to get child issue progress")
 		return
@@ -2670,14 +2789,23 @@ func (h *Handler) ChildIssueProgress(w http.ResponseWriter, r *http.Request) {
 		Total         int64  `json:"total"`
 		Done          int64  `json:"done"`
 	}
-	resp := make([]progressEntry, len(rows))
-	for i, row := range rows {
-		resp[i] = progressEntry{
-			ParentIssueID: uuidToString(row.ParentIssueID),
-			Total:         row.Total,
-			Done:          row.Done,
+	resp := make([]progressEntry, 0, len(rows))
+	for rows.Next() {
+		var parentID pgtype.UUID
+		var total, done int64
+		if err := rows.Scan(&parentID, &total, &done); err != nil {
+			rows.Close()
+			writeError(w, http.StatusInternalServerError, "failed to get child issue progress")
+			return
 		}
+		resp = append(resp, progressEntry{ParentIssueID: uuidToString(parentID), Total: total, Done: done})
 	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		writeError(w, http.StatusInternalServerError, "failed to get child issue progress")
+		return
+	}
+	rows.Close()
 	writeJSON(w, http.StatusOK, map[string]any{
 		"progress": resp,
 	})
@@ -2882,11 +3010,17 @@ func (h *Handler) QuickCreateIssue(w http.ResponseWriter, r *http.Request) {
 		if !ok {
 			return
 		}
-		if _, err := h.Queries.GetProjectInWorkspace(r.Context(), db.GetProjectInWorkspaceParams{
+		project, err := h.Queries.GetProjectInWorkspace(r.Context(), db.GetProjectInWorkspaceParams{
 			ID:          pid,
 			WorkspaceID: wsUUID,
-		}); err != nil {
+		})
+		if err != nil {
 			writeError(w, http.StatusBadRequest, "project not found")
+			return
+		}
+		visibility, visible := h.objectVisibilityForMember(r.Context(), workspaceID, requesterID)
+		if !visible || !h.canReadProject(r.Context(), visibility, project) {
+			writeError(w, http.StatusNotFound, "project not found")
 			return
 		}
 		projectUUID = pid
@@ -2908,6 +3042,11 @@ func (h *Handler) QuickCreateIssue(w http.ResponseWriter, r *http.Request) {
 		})
 		if err != nil || !parent.ID.Valid {
 			writeError(w, http.StatusBadRequest, "parent issue not found in this workspace")
+			return
+		}
+		visibility, visible := h.objectVisibilityForMember(r.Context(), workspaceID, requesterID)
+		if !visible || !h.canReadIssue(r.Context(), visibility, parent) {
+			writeError(w, http.StatusNotFound, "parent issue not found")
 			return
 		}
 		parentIssueUUID = pid
@@ -3249,13 +3388,18 @@ func (h *Handler) CreateIssue(w http.ResponseWriter, r *http.Request) {
 		// found" rather than a 403 that leaks nothing about which input was wrong.
 		// The row itself is no longer needed: the assignee gate keys on the actor's
 		// originator, not on a scope bound to the parent (MUL-6951).
-		if assigneeType.Valid && (assigneeType.String == "agent" || assigneeType.String == "squad") {
+		{
 			parent, err := h.Queries.GetIssueInWorkspace(r.Context(), db.GetIssueInWorkspaceParams{
 				ID:          parentIssueID,
 				WorkspaceID: wsUUID,
 			})
 			if err != nil || !parent.ID.Valid {
 				writeError(w, http.StatusBadRequest, "parent issue not found in this workspace")
+				return
+			}
+			visibility, visible := h.objectVisibilityForMember(r.Context(), workspaceID, creatorID)
+			if !visible || !h.canReadIssue(r.Context(), visibility, parent) {
+				writeError(w, http.StatusNotFound, "parent issue not found")
 				return
 			}
 		}
@@ -3269,6 +3413,16 @@ func (h *Handler) CreateIssue(w http.ResponseWriter, r *http.Request) {
 	if req.ProjectID != nil {
 		id, ok := parseUUIDOrBadRequest(w, *req.ProjectID, "project_id")
 		if !ok {
+			return
+		}
+		project, err := h.Queries.GetProjectInWorkspace(r.Context(), db.GetProjectInWorkspaceParams{ID: id, WorkspaceID: wsUUID})
+		if err != nil {
+			writeError(w, http.StatusNotFound, "project not found")
+			return
+		}
+		visibility, visible := h.objectVisibilityForMember(r.Context(), workspaceID, creatorID)
+		if !visible || !h.canReadProject(r.Context(), visibility, project) {
+			writeError(w, http.StatusNotFound, "project not found")
 			return
 		}
 		projectID = id
@@ -3878,11 +4032,17 @@ func (h *Handler) UpdateIssue(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			// Validate parent exists in the same workspace.
-			if _, err := h.Queries.GetIssueInWorkspace(r.Context(), db.GetIssueInWorkspaceParams{
+			parent, err := h.Queries.GetIssueInWorkspace(r.Context(), db.GetIssueInWorkspaceParams{
 				ID:          newParentID,
 				WorkspaceID: prevIssue.WorkspaceID,
-			}); err != nil {
+			})
+			if err != nil {
 				writeError(w, http.StatusBadRequest, "parent issue not found in this workspace")
+				return
+			}
+			visibility, visible := h.objectVisibilityForMember(r.Context(), uuidToString(prevIssue.WorkspaceID), requestUserID(r))
+			if !visible || !h.canReadIssue(r.Context(), visibility, parent) {
+				writeError(w, http.StatusNotFound, "parent issue not found")
 				return
 			}
 			// Cycle detection: walk up from the new parent to ensure we don't reach this issue.
@@ -3909,10 +4069,11 @@ func (h *Handler) UpdateIssue(w http.ResponseWriter, r *http.Request) {
 			if !ok {
 				return
 			}
-			if _, err := h.Queries.GetProjectInWorkspace(r.Context(), db.GetProjectInWorkspaceParams{
+			project, err := h.Queries.GetProjectInWorkspace(r.Context(), db.GetProjectInWorkspaceParams{
 				ID:          projectUUID,
 				WorkspaceID: prevIssue.WorkspaceID,
-			}); err != nil {
+			})
+			if err != nil {
 				if !isNotFound(err) {
 					slog.Error("update issue: validate project scope",
 						append(logger.RequestAttrs(r), "project_id", uuidToString(projectUUID), "error", err)...)
@@ -3920,6 +4081,11 @@ func (h *Handler) UpdateIssue(w http.ResponseWriter, r *http.Request) {
 					return
 				}
 				writeError(w, http.StatusBadRequest, "project not found in this workspace")
+				return
+			}
+			visibility, ok := h.objectVisibilityForMember(r.Context(), workspaceID, userID)
+			if !ok || !h.canReadProject(r.Context(), visibility, project) {
+				writeError(w, http.StatusNotFound, "project not found")
 				return
 			}
 			params.ProjectID = projectUUID
@@ -4310,6 +4476,7 @@ func (h *Handler) DeleteIssue(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	deletedIssueRecipients := h.issueEventRecipients(r.Context(), issue)
 
 	h.TaskService.CancelTasksForIssue(r.Context(), issue.ID)
 	// Fail any linked autopilot runs before delete (ON DELETE SET NULL clears issue_id).
@@ -4328,7 +4495,10 @@ func (h *Handler) DeleteIssue(w http.ResponseWriter, r *http.Request) {
 	// identifier-style payload ("MUL-123") would leave stale entries on
 	// other clients after an identifier-path delete.
 	resolvedID := uuidToString(issue.ID)
-	h.publish(protocol.EventIssueDeleted, uuidToString(issue.WorkspaceID), actorType, actorID, map[string]any{"issue_id": resolvedID})
+	h.Bus.Publish(events.Event{
+		Type: protocol.EventIssueDeleted, WorkspaceID: uuidToString(issue.WorkspaceID), ActorType: actorType, ActorID: actorID,
+		Payload: map[string]any{"issue_id": resolvedID}, RecipientIDs: deletedIssueRecipients,
+	})
 	h.publishIssueSnapshots(r.Context(), deleteResult.DetachedChildren, actorType, actorID)
 	h.publishClearedDuplicates(r.Context(), deleteResult.ClearedDuplicates, actorType, actorID)
 	slog.Info("issue deleted", append(logger.RequestAttrs(r), "issue_id", resolvedID, "workspace_id", uuidToString(issue.WorkspaceID))...)
@@ -4554,6 +4724,42 @@ func (h *Handler) BatchUpdateIssues(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	visibility, ok := h.objectVisibilityForMember(r.Context(), workspaceID, userID)
+	if !ok {
+		writeError(w, http.StatusInternalServerError, "failed to resolve object visibility")
+		return
+	}
+	// Resolve and authorize the complete target set before the mutation loop so
+	// an inaccessible object can never leave a partially applied batch.
+	preflightIDs := make(map[pgtype.UUID]struct{}, len(req.IssueIDs))
+	for _, rawID := range req.IssueIDs {
+		id, err := util.ParseUUID(rawID)
+		if err != nil {
+			writeError(w, http.StatusNotFound, "issue not found")
+			return
+		}
+		if _, duplicate := preflightIDs[id]; duplicate {
+			continue
+		}
+		prev, err := h.Queries.GetIssueInWorkspace(r.Context(), db.GetIssueInWorkspaceParams{ID: id, WorkspaceID: wsUUID})
+		if err != nil || !h.canReadIssue(r.Context(), visibility, prev) {
+			writeError(w, http.StatusNotFound, "issue not found")
+			return
+		}
+		preflightIDs[id] = struct{}{}
+	}
+	if _, touched := rawUpdates["parent_issue_id"]; touched && req.Updates.ParentIssueID != nil {
+		parentID, err := util.ParseUUID(*req.Updates.ParentIssueID)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "invalid parent_issue_id")
+			return
+		}
+		parent, err := h.Queries.GetIssueInWorkspace(r.Context(), db.GetIssueInWorkspaceParams{ID: parentID, WorkspaceID: wsUUID})
+		if err != nil || !h.canReadIssue(r.Context(), visibility, parent) {
+			writeError(w, http.StatusNotFound, "parent issue not found")
+			return
+		}
+	}
 	// Status is validated against this workspace's catalog, so it has to wait
 	// for wsUUID above. One check for the whole batch — every issue in it
 	// shares the workspace — and a rejection rather than a silent skip, so a
@@ -4577,10 +4783,11 @@ func (h *Handler) BatchUpdateIssues(w http.ResponseWriter, r *http.Request) {
 		if !ok {
 			return
 		}
-		if _, err := h.Queries.GetProjectInWorkspace(r.Context(), db.GetProjectInWorkspaceParams{
+		project, err := h.Queries.GetProjectInWorkspace(r.Context(), db.GetProjectInWorkspaceParams{
 			ID:          projectUUID,
 			WorkspaceID: wsUUID,
-		}); err != nil {
+		})
+		if err != nil {
 			if !isNotFound(err) {
 				slog.Error("batch update issues: validate project scope",
 					append(logger.RequestAttrs(r), "project_id", uuidToString(projectUUID), "error", err)...)
@@ -4588,6 +4795,10 @@ func (h *Handler) BatchUpdateIssues(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			writeError(w, http.StatusBadRequest, "project not found in this workspace")
+			return
+		}
+		if !h.canReadProject(r.Context(), visibility, project) {
+			writeError(w, http.StatusNotFound, "project not found")
 			return
 		}
 		batchProjectID = projectUUID
@@ -4864,6 +5075,29 @@ func (h *Handler) BatchDeleteIssues(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	visibility, ok := h.objectVisibilityForMember(r.Context(), workspaceID, userID)
+	if !ok {
+		writeError(w, http.StatusInternalServerError, "failed to resolve object visibility")
+		return
+	}
+	// Preflight every unique target before cancelling runs or deleting any row.
+	preflightIDs := make(map[pgtype.UUID]struct{}, len(req.IssueIDs))
+	for _, rawID := range req.IssueIDs {
+		id, err := util.ParseUUID(rawID)
+		if err != nil {
+			writeError(w, http.StatusNotFound, "issue not found")
+			return
+		}
+		if _, duplicate := preflightIDs[id]; duplicate {
+			continue
+		}
+		issue, err := h.Queries.GetIssueInWorkspace(r.Context(), db.GetIssueInWorkspaceParams{ID: id, WorkspaceID: wsUUID})
+		if err != nil || !h.canReadIssue(r.Context(), visibility, issue) {
+			writeError(w, http.StatusNotFound, "issue not found")
+			return
+		}
+		preflightIDs[id] = struct{}{}
+	}
 	issues := make([]db.Issue, 0, len(req.IssueIDs))
 	excludedIDs := make([]pgtype.UUID, 0, len(req.IssueIDs))
 	seenIssueIDs := make(map[pgtype.UUID]struct{}, len(req.IssueIDs))
@@ -4889,6 +5123,10 @@ func (h *Handler) BatchDeleteIssues(w http.ResponseWriter, r *http.Request) {
 		h.TaskService.CancelTasksForIssue(r.Context(), issue.ID)
 		_ = h.AutopilotService.FailAutopilotRunsByIssue(r.Context(), issue.ID)
 	}
+	issueRecipients := make(map[string][]string, len(issues))
+	for _, issue := range issues {
+		issueRecipients[uuidToString(issue.ID)] = h.issueEventRecipients(r.Context(), issue)
+	}
 	deleteResult, err := h.deleteIssuesAndCollectAttachmentURLs(r.Context(), issues, excludedIDs)
 	if err != nil {
 		slog.Warn("batch delete issues failed", "error", err)
@@ -4898,7 +5136,10 @@ func (h *Handler) BatchDeleteIssues(w http.ResponseWriter, r *http.Request) {
 	h.deleteS3Objects(r.Context(), deleteResult.AttachmentURLs)
 	actorType, actorID := h.resolveActor(r, userID, workspaceID)
 	for _, issue := range issues {
-		h.publish(protocol.EventIssueDeleted, workspaceID, actorType, actorID, map[string]any{"issue_id": uuidToString(issue.ID)})
+		h.Bus.Publish(events.Event{
+			Type: protocol.EventIssueDeleted, WorkspaceID: workspaceID, ActorType: actorType, ActorID: actorID,
+			Payload: map[string]any{"issue_id": uuidToString(issue.ID)}, RecipientIDs: issueRecipients[uuidToString(issue.ID)],
+		})
 	}
 	h.publishIssueSnapshots(r.Context(), deleteResult.DetachedChildren, actorType, actorID)
 	h.publishClearedDuplicates(r.Context(), deleteResult.ClearedDuplicates, actorType, actorID)

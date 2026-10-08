@@ -271,6 +271,9 @@ func (h *Handler) ListIssueTableRows(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	if !h.auditIssueTableRescue(w, r, compiled) {
+		return
+	}
 	if !issueTableCursorMatches(w, cursor, compiled.fingerprint, groupKey, request.ParentID) {
 		return
 	}

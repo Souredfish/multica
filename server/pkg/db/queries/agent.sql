@@ -2562,6 +2562,7 @@ JOIN issue i ON i.id = atq.issue_id
 JOIN workspace w ON w.id = i.workspace_id
 WHERE i.workspace_id = @workspace_id
   AND (i.id = @root_issue_id::uuid OR i.parent_issue_id = @root_issue_id::uuid)
+  AND can_member_read_issue(i.workspace_id, i.id, @user_id::uuid)
   AND atq.status IN ('queued', 'dispatched', 'running', 'waiting_local_directory')
 ORDER BY
     CASE atq.status

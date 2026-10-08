@@ -161,6 +161,19 @@ func (h *Handler) loadSquadInWorkspace(w http.ResponseWriter, r *http.Request) (
 		writeError(w, http.StatusNotFound, "squad not found")
 		return db.Squad{}, "", false
 	}
+	userID, ok := requireUserID(w, r)
+	if !ok {
+		return db.Squad{}, "", false
+	}
+	visibility, ok := h.objectVisibilityForMember(r.Context(), workspaceID, userID)
+	if !ok {
+		writeError(w, http.StatusInternalServerError, "failed to resolve object visibility")
+		return db.Squad{}, "", false
+	}
+	if !h.canReadSquad(r.Context(), visibility, squad) {
+		writeError(w, http.StatusNotFound, "squad not found")
+		return db.Squad{}, "", false
+	}
 	return squad, workspaceID, true
 }
 
@@ -194,11 +207,27 @@ func (h *Handler) ListSquads(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	userID, ok := requireUserID(w, r)
+	if !ok {
+		return
+	}
+	visibility, ok := h.objectVisibilityForMember(r.Context(), workspaceID, userID)
+	if !ok {
+		writeError(w, http.StatusInternalServerError, "failed to resolve object visibility")
+		return
+	}
 	squads, err := h.Queries.ListSquads(r.Context(), wsUUID)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to list squads")
 		return
 	}
+	visibleSquads := squads[:0]
+	for _, squad := range squads {
+		if h.canReadSquad(r.Context(), visibility, squad) {
+			visibleSquads = append(visibleSquads, squad)
+		}
+	}
+	squads = visibleSquads
 
 	previewRows, err := h.Queries.ListSquadMemberPreviewRows(r.Context(), wsUUID)
 	if err != nil {
@@ -500,6 +529,11 @@ func (h *Handler) DeleteSquad(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "squad is already archived")
 		return
 	}
+	deleteRecipients, err := h.BusinessObjectRecipients(r.Context(), workspaceID, "squad", uuidToString(squad.ID))
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to resolve squad event recipients")
+		return
+	}
 
 	// Transfer issues assigned to this squad to the leader agent.
 	if err := h.Queries.TransferSquadAssignees(r.Context(), db.TransferSquadAssigneesParams{
@@ -533,10 +567,10 @@ func (h *Handler) DeleteSquad(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	h.publish(protocol.EventSquadDeleted, workspaceID, "member", userID, map[string]any{
+	h.publishWithRecipients(protocol.EventSquadDeleted, workspaceID, "member", userID, map[string]any{
 		"squad_id":  uuidToString(squad.ID),
 		"leader_id": uuidToString(squad.LeaderID),
-	})
+	}, deleteRecipients)
 	w.WriteHeader(http.StatusNoContent)
 }
 

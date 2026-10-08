@@ -12,6 +12,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/multica-ai/multica/server/internal/util"
+	db "github.com/multica-ai/multica/server/pkg/db/generated"
 )
 
 var issueMoveFields = map[string]struct{}{
@@ -67,20 +68,22 @@ func (h *Handler) MoveIssue(w http.ResponseWriter, r *http.Request) {
 		if !valid {
 			return
 		}
-		var exists bool
-		err := h.DB.QueryRow(r.Context(), `
-			SELECT EXISTS (
-				SELECT 1
-				FROM project
-				WHERE workspace_id = $1 AND id = $2
-			)
-		`, current.WorkspaceID, *projectID).Scan(&exists)
+		project, err := h.Queries.GetProjectInWorkspace(r.Context(), db.GetProjectInWorkspaceParams{ID: *projectID, WorkspaceID: current.WorkspaceID})
 		if err != nil {
-			writeIssueTableQueryFailure(w, r, "failed to validate move project")
+			if !isNotFound(err) {
+				writeIssueTableQueryFailure(w, r, "failed to validate move project")
+				return
+			}
+			writeError(w, http.StatusBadRequest, "project not found in this workspace")
 			return
 		}
-		if !exists {
-			writeError(w, http.StatusBadRequest, "project not found in this workspace")
+		visibility, ok := h.objectVisibilityForMember(r.Context(), uuidToString(current.WorkspaceID), requestUserID(r))
+		if !ok {
+			writeError(w, http.StatusInternalServerError, "failed to resolve object visibility")
+			return
+		}
+		if !h.canReadProject(r.Context(), visibility, project) {
+			writeError(w, http.StatusNotFound, "project not found")
 			return
 		}
 	}
@@ -171,12 +174,7 @@ func (h *Handler) issueMoveAnchorPosition(
 	if id == nil {
 		return nil, true
 	}
-	var position float64
-	err := h.DB.QueryRow(r.Context(), `
-		SELECT position
-		FROM issue
-		WHERE workspace_id = $1 AND id = $2
-	`, workspaceID, *id).Scan(&position)
+	anchor, err := h.Queries.GetIssueInWorkspace(r.Context(), db.GetIssueInWorkspaceParams{ID: *id, WorkspaceID: workspaceID})
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			writeError(w, http.StatusBadRequest, "move anchor not found in this workspace")
@@ -185,6 +183,16 @@ func (h *Handler) issueMoveAnchorPosition(
 		}
 		return nil, false
 	}
+	visibility, ok := h.objectVisibilityForMember(r.Context(), uuidToString(workspaceID), requestUserID(r))
+	if !ok {
+		writeError(w, http.StatusInternalServerError, "failed to resolve object visibility")
+		return nil, false
+	}
+	if !h.canReadIssue(r.Context(), visibility, anchor) {
+		writeError(w, http.StatusNotFound, "issue not found")
+		return nil, false
+	}
+	position := anchor.Position
 	return &position, true
 }
 

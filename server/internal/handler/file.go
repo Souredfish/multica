@@ -772,8 +772,64 @@ func (h *Handler) loadAttachmentForRequest(w http.ResponseWriter, r *http.Reques
 		writeError(w, http.StatusNotFound, "attachment not found")
 		return db.Attachment{}, false
 	}
+	if !h.authorizeAttachmentIssue(w, r, att) {
+		return db.Attachment{}, false
+	}
 
 	return att, true
+}
+
+// authorizeAttachmentIssue makes issue/comment/source-context/task attachments
+// inherit the parent issue's object visibility. Chat-only attachments have no
+// issue parent and continue through their existing chat authorization path.
+func (h *Handler) authorizeAttachmentIssue(w http.ResponseWriter, r *http.Request, att db.Attachment) bool {
+	issueID := att.IssueID
+	if !issueID.Valid && att.CommentID.Valid {
+		comment, err := h.Queries.GetComment(r.Context(), att.CommentID)
+		if err != nil || comment.WorkspaceID != att.WorkspaceID {
+			writeError(w, http.StatusNotFound, "attachment not found")
+			return false
+		}
+		issueID = comment.IssueID
+	}
+	if !issueID.Valid && att.SourceContextID.Valid {
+		sourceContext, err := h.Queries.GetIssueSourceContextByID(r.Context(), db.GetIssueSourceContextByIDParams{
+			ID: att.SourceContextID, WorkspaceID: att.WorkspaceID,
+		})
+		if err != nil {
+			writeError(w, http.StatusNotFound, "attachment not found")
+			return false
+		}
+		issueID = sourceContext.IssueID
+	}
+	if !issueID.Valid && att.TaskID.Valid {
+		task, err := h.Queries.GetAgentTask(r.Context(), att.TaskID)
+		if err == nil {
+			issueID = task.IssueID
+		}
+	}
+	if !issueID.Valid {
+		return true
+	}
+	userID, ok := requireUserID(w, r)
+	if !ok {
+		return false
+	}
+	issue, err := h.Queries.GetIssueInWorkspace(r.Context(), db.GetIssueInWorkspaceParams{ID: issueID, WorkspaceID: att.WorkspaceID})
+	if err != nil {
+		writeError(w, http.StatusNotFound, "attachment not found")
+		return false
+	}
+	scope, ok := h.objectVisibilityForMember(r.Context(), uuidToString(att.WorkspaceID), userID)
+	if !ok {
+		writeError(w, http.StatusInternalServerError, "failed to resolve object visibility")
+		return false
+	}
+	if !h.canReadIssue(r.Context(), scope, issue) {
+		writeError(w, http.StatusNotFound, "attachment not found")
+		return false
+	}
+	return true
 }
 
 // loadAttachmentForDownload is a workspace-self-resolving variant used by the
@@ -820,6 +876,9 @@ func (h *Handler) loadAttachmentForDownload(w http.ResponseWriter, r *http.Reque
 		return db.Attachment{}, false
 	}
 	if h.MembershipCache.Get(r.Context(), userID, workspaceID) {
+		if !h.authorizeAttachmentIssue(w, r, att) {
+			return db.Attachment{}, false
+		}
 		return att, true
 	}
 	if _, err := h.getWorkspaceMember(r.Context(), userID, workspaceID); err != nil {
@@ -827,6 +886,9 @@ func (h *Handler) loadAttachmentForDownload(w http.ResponseWriter, r *http.Reque
 		return db.Attachment{}, false
 	}
 	h.MembershipCache.Set(r.Context(), userID, workspaceID)
+	if !h.authorizeAttachmentIssue(w, r, att) {
+		return db.Attachment{}, false
+	}
 	return att, true
 }
 
@@ -1440,6 +1502,9 @@ func (h *Handler) DeleteAttachment(w http.ResponseWriter, r *http.Request) {
 	})
 	if err != nil {
 		writeError(w, http.StatusNotFound, "attachment not found")
+		return
+	}
+	if !h.authorizeAttachmentIssue(w, r, att) {
 		return
 	}
 	// Captured-context attachments are immutable historical copies. They are

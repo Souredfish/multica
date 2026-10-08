@@ -153,6 +153,11 @@ func (h *Handler) PreviewIssueTrigger(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "workspace is required")
 		return
 	}
+	visibility, ok := h.objectVisibilityForMember(r.Context(), workspaceID, userID)
+	if !ok {
+		writeError(w, http.StatusInternalServerError, "failed to resolve object visibility")
+		return
+	}
 
 	var req IssueTriggerPreviewRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -228,6 +233,9 @@ func (h *Handler) PreviewIssueTrigger(w http.ResponseWriter, r *http.Request) {
 		})
 		if err != nil {
 			continue // cross-workspace / unknown id contributes no trigger
+		}
+		if !h.canReadIssue(r.Context(), visibility, loaded) {
+			continue
 		}
 
 		post := loaded

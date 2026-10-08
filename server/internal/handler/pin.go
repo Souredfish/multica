@@ -1,11 +1,14 @@
 package handler
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"strings"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/jackc/pgx/v5/pgtype"
+	"github.com/multica-ai/multica/server/internal/util"
 	db "github.com/multica-ai/multica/server/pkg/db/generated"
 	"github.com/multica-ai/multica/server/pkg/protocol"
 )
@@ -50,6 +53,22 @@ type ReorderItem struct {
 	Position float64 `json:"position"`
 }
 
+func (h *Handler) canReadPinnedObject(ctx context.Context, visibility objectVisibility, itemType string, itemID, workspaceID, userID pgtype.UUID) bool {
+	switch itemType {
+	case "issue":
+		issue, err := h.Queries.GetIssueInWorkspace(ctx, db.GetIssueInWorkspaceParams{ID: itemID, WorkspaceID: workspaceID})
+		return err == nil && h.canReadIssue(ctx, visibility, issue)
+	case "project":
+		project, err := h.Queries.GetProjectInWorkspace(ctx, db.GetProjectInWorkspaceParams{ID: itemID, WorkspaceID: workspaceID})
+		return err == nil && h.canReadProject(ctx, visibility, project)
+	case "view":
+		view, err := h.Queries.GetIssueView(ctx, db.GetIssueViewParams{ID: itemID, WorkspaceID: workspaceID})
+		return err == nil && canReadIssueView(view, userID)
+	default:
+		return false
+	}
+}
+
 func (h *Handler) ListPins(w http.ResponseWriter, r *http.Request) {
 	userID, ok := requireUserID(w, r)
 	if !ok {
@@ -65,6 +84,11 @@ func (h *Handler) ListPins(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "failed to list pins")
 		return
 	}
+	visibility, ok := h.objectVisibilityForMember(r.Context(), workspaceID, userID)
+	if !ok {
+		writeError(w, http.StatusInternalServerError, "failed to resolve object visibility")
+		return
+	}
 
 	// Capability opt-in: clients built before saved views classified every
 	// non-issue pin as a project pin, fetched its detail, got 404, and
@@ -77,6 +101,9 @@ func (h *Handler) ListPins(w http.ResponseWriter, r *http.Request) {
 	resp := make([]PinnedItemResponse, 0, len(pins))
 	for _, p := range pins {
 		if p.ItemType == "view" && !includeViews {
+			continue
+		}
+		if !h.canReadPinnedObject(r.Context(), visibility, p.ItemType, p.ItemID, parseUUID(workspaceID), parseUUID(userID)) {
 			continue
 		}
 		resp = append(resp, pinnedItemToResponse(p))
@@ -117,16 +144,20 @@ func (h *Handler) CreatePin(w http.ResponseWriter, r *http.Request) {
 	// Verify the item exists in this workspace
 	switch req.ItemType {
 	case "issue":
-		if _, err := h.Queries.GetIssueInWorkspace(r.Context(), db.GetIssueInWorkspaceParams{
+		issue, err := h.Queries.GetIssueInWorkspace(r.Context(), db.GetIssueInWorkspaceParams{
 			ID: itemUUID, WorkspaceID: wsUUID,
-		}); err != nil {
+		})
+		visibility, scopeOK := h.objectVisibilityForMember(r.Context(), workspaceID, userID)
+		if err != nil || !scopeOK || !h.canReadIssue(r.Context(), visibility, issue) {
 			writeError(w, http.StatusNotFound, "issue not found")
 			return
 		}
 	case "project":
-		if _, err := h.Queries.GetProjectInWorkspace(r.Context(), db.GetProjectInWorkspaceParams{
+		project, err := h.Queries.GetProjectInWorkspace(r.Context(), db.GetProjectInWorkspaceParams{
 			ID: itemUUID, WorkspaceID: wsUUID,
-		}); err != nil {
+		})
+		visibility, scopeOK := h.objectVisibilityForMember(r.Context(), workspaceID, userID)
+		if err != nil || !scopeOK || !h.canReadProject(r.Context(), visibility, project) {
 			writeError(w, http.StatusNotFound, "project not found")
 			return
 		}
@@ -191,6 +222,11 @@ func (h *Handler) DeletePin(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	visibility, ok := h.objectVisibilityForMember(r.Context(), workspaceID, userID)
+	if !ok || !h.canReadPinnedObject(r.Context(), visibility, itemType, itemUUID, wsUUID, parseUUID(userID)) {
+		writeError(w, http.StatusNotFound, "pinned object not found")
+		return
+	}
 
 	err := h.Queries.DeletePinnedItem(r.Context(), db.DeletePinnedItemParams{
 		WorkspaceID: wsUUID,
@@ -226,6 +262,28 @@ func (h *Handler) ReorderPins(w http.ResponseWriter, r *http.Request) {
 	wsUUID, ok := parseUUIDOrBadRequest(w, workspaceID, "workspace id")
 	if !ok {
 		return
+	}
+	visibility, ok := h.objectVisibilityForMember(r.Context(), workspaceID, userID)
+	if !ok {
+		writeError(w, http.StatusInternalServerError, "failed to resolve object visibility")
+		return
+	}
+	pins, err := h.Queries.ListPinnedItems(r.Context(), db.ListPinnedItemsParams{WorkspaceID: wsUUID, UserID: parseUUID(userID)})
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to list pins")
+		return
+	}
+	pinByID := make(map[pgtype.UUID]db.PinnedItem, len(pins))
+	for _, pin := range pins {
+		pinByID[pin.ID] = pin
+	}
+	for _, item := range req.Items {
+		pinID, err := util.ParseUUID(item.ID)
+		pin, exists := pinByID[pinID]
+		if err != nil || !exists || !h.canReadPinnedObject(r.Context(), visibility, pin.ItemType, pin.ItemID, wsUUID, parseUUID(userID)) {
+			writeError(w, http.StatusNotFound, "pinned object not found")
+			return
+		}
 	}
 
 	for _, item := range req.Items {

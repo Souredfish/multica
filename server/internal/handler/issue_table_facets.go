@@ -382,6 +382,9 @@ func (h *Handler) ListIssueTableFacets(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	if !h.auditIssueTableRescue(w, r, base) {
+		return
+	}
 
 	seen := make(map[string]struct{}, len(request.Facets))
 	normalizedFacets := make([]issueTableFacetSpec, len(request.Facets))

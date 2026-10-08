@@ -240,6 +240,11 @@ func (h *Handler) pluginIssueForUser(w http.ResponseWriter, r *http.Request, cal
 		publicapiv1.WriteProblem(w, r, http.StatusNotFound, "not_found", "issue not found")
 		return db.Issue{}, false
 	}
+	visibility, ok := h.objectVisibilityForMember(r.Context(), uuidToString(caller.WorkspaceID), uuidToString(caller.UserID))
+	if !ok || !h.canReadIssue(r.Context(), visibility, issue) {
+		publicapiv1.WriteProblem(w, r, http.StatusNotFound, "not_found", "issue not found")
+		return db.Issue{}, false
+	}
 	return issue, true
 }
 

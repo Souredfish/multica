@@ -164,6 +164,7 @@ type issueTableSQL struct {
 	args        []any
 	fingerprint string
 	workspaceID pgtype.UUID
+	visibility  objectVisibility
 }
 
 type issueTableCursor struct {
@@ -446,6 +447,16 @@ func (h *Handler) compileIssueTableQuery(w http.ResponseWriter, r *http.Request,
 		args = append(args, value)
 		return "$" + strconv.Itoa(len(args))
 	}
+	userID, ok := requireUserID(w, r)
+	if !ok {
+		return issueTableSQL{}, false
+	}
+	visibility, ok := h.objectVisibilityForMember(r.Context(), workspaceID, userID)
+	if !ok {
+		writeError(w, http.StatusInternalServerError, "failed to resolve object visibility")
+		return issueTableSQL{}, false
+	}
+	where = append(where, visibility.issueVisibilityPredicate("i", addArg))
 
 	// Any non-empty status KEY, not just the 7 built-ins. A status filter names
 	// the exact statuses the user picked, and since MUL-6243 those can be custom
@@ -691,5 +702,40 @@ func (h *Handler) compileIssueTableQuery(w http.ResponseWriter, r *http.Request,
 		args:        args,
 		fingerprint: fingerprint,
 		workspaceID: workspaceUUID,
+		visibility:  visibility,
 	}, true
+}
+
+func (h *Handler) auditIssueTableRescue(w http.ResponseWriter, r *http.Request, query issueTableSQL) bool {
+	if !query.visibility.rescue {
+		return true
+	}
+	rows, err := h.DB.Query(r.Context(), fmt.Sprintf("SELECT i.id FROM issue i WHERE %s", query.where), query.args...)
+	if err != nil {
+		writeIssueTableQueryFailure(w, r, "failed to audit table rescue access")
+		return false
+	}
+	ids := make([]pgtype.UUID, 0)
+	for rows.Next() {
+		var id pgtype.UUID
+		if err := rows.Scan(&id); err != nil {
+			rows.Close()
+			writeError(w, http.StatusInternalServerError, "failed to audit table rescue access")
+			return false
+		}
+		ids = append(ids, id)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		writeIssueTableQueryFailure(w, r, "failed to audit table rescue access")
+		return false
+	}
+	rows.Close()
+	for _, id := range ids {
+		if !h.auditRescueObject(r.Context(), query.visibility, "issue", id, "table_query") {
+			writeError(w, http.StatusInternalServerError, "failed to record rescue access")
+			return false
+		}
+	}
+	return true
 }

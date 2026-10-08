@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"log/slog"
@@ -11,6 +12,104 @@ import (
 	"github.com/multica-ai/multica/server/internal/realtime"
 	"github.com/multica-ai/multica/server/pkg/protocol"
 )
+
+type eventAudienceResolver func(context.Context, events.Event) ([]string, bool)
+
+func eventObjectReference(e events.Event) (objectType, objectID string, scoped bool) {
+	if e.TaskID != "" {
+		return "task", e.TaskID, true
+	}
+	var payload map[string]any
+	encoded, err := json.Marshal(e.Payload)
+	if err == nil {
+		_ = json.Unmarshal(encoded, &payload)
+	}
+	if payload != nil {
+		for _, key := range []string{"issue_id", "issueId"} {
+			if id := findPayloadString(payload, key); id != "" {
+				return "issue", id, true
+			}
+		}
+		for _, key := range []string{"project_id", "projectId"} {
+			if id := findPayloadString(payload, key); id != "" {
+				return "project", id, true
+			}
+		}
+		for _, key := range []string{"squad_id", "squadId"} {
+			if id := findPayloadString(payload, key); id != "" {
+				return "squad", id, true
+			}
+		}
+		for _, ref := range []struct{ key, typ string }{{"issue", "issue"}, {"project", "project"}, {"squad", "squad"}} {
+			if id := findNestedObjectID(payload, ref.key); id != "" {
+				return ref.typ, id, true
+			}
+		}
+		if id, ok := payload["task_id"].(string); ok && id != "" {
+			return "task", id, true
+		}
+	}
+	t := strings.ToLower(e.Type)
+	for _, prefix := range []string{"issue", "task", "project", "squad", "comment", "attachment", "reaction", "issue_metadata", "issue_labels", "issue_properties", "issue_status", "wakeup"} {
+		if strings.HasPrefix(t, prefix) {
+			return "", "", true
+		}
+	}
+	return "", "", false
+}
+
+func findPayloadString(value any, key string) string {
+	switch current := value.(type) {
+	case map[string]any:
+		if id, ok := current[key].(string); ok && id != "" {
+			return id
+		}
+		for _, child := range current {
+			if id := findPayloadString(child, key); id != "" {
+				return id
+			}
+		}
+	case []any:
+		for _, child := range current {
+			if id := findPayloadString(child, key); id != "" {
+				return id
+			}
+		}
+	}
+	return ""
+}
+
+func findNestedObjectID(value any, key string) string {
+	switch current := value.(type) {
+	case map[string]any:
+		if object, ok := current[key].(map[string]any); ok {
+			if id, ok := object["id"].(string); ok && id != "" {
+				return id
+			}
+		}
+		for _, child := range current {
+			if id := findNestedObjectID(child, key); id != "" {
+				return id
+			}
+		}
+	case []any:
+		for _, child := range current {
+			if id := findNestedObjectID(child, key); id != "" {
+				return id
+			}
+		}
+	}
+	return ""
+}
+
+func audienceContains(audience []string, userID string) bool {
+	for _, candidate := range audience {
+		if candidate == userID {
+			return true
+		}
+	}
+	return false
+}
 
 // internalOnlyPayloadKeys lists payload keys that exist purely for in-process
 // listeners and must never be serialized to a WebSocket client.
@@ -76,7 +175,23 @@ func projectOutbound(eventType string, payload any) any {
 // for a Redis-backed relay or a feature-flagged dual-write implementation
 // without touching any of the event listeners below. This is Phase 0 of the
 // horizontal-scaling plan tracked in MUL-1138.
-func registerListeners(bus *events.Bus, b realtime.Broadcaster) {
+func registerListeners(bus *events.Bus, b realtime.Broadcaster, audienceResolvers ...eventAudienceResolver) {
+	var resolveAudience eventAudienceResolver
+	if len(audienceResolvers) > 0 {
+		resolveAudience = audienceResolvers[0]
+	}
+	eventVisibleTo := func(e events.Event, recipientID string) bool {
+		if e.RecipientIDs != nil {
+			return audienceContains(e.RecipientIDs, recipientID)
+		}
+		if resolveAudience != nil {
+			audience, scoped := resolveAudience(context.Background(), e)
+			if scoped {
+				return audienceContains(audience, recipientID)
+			}
+		}
+		return true
+	}
 	// Personal events should NOT be broadcast to the whole workspace.
 	personalEvents := map[string]bool{
 		protocol.EventInboxNew:           true,
@@ -93,7 +208,7 @@ func registerListeners(bus *events.Bus, b realtime.Broadcaster) {
 
 	// Helper: marshal event and send to a specific user.
 	sendToRecipient := func(b realtime.Broadcaster, e events.Event, recipientID string) {
-		if recipientID == "" {
+		if recipientID == "" || !eventVisibleTo(e, recipientID) {
 			return
 		}
 		data, err := json.Marshal(map[string]any{"type": e.Type, "payload": projectOutbound(e.Type, e.Payload), "actor_id": e.ActorID, "actor_type": e.ActorType})
@@ -244,6 +359,21 @@ func registerListeners(bus *events.Bus, b realtime.Broadcaster) {
 		// Skip personal events — they are handled by type-specific listeners above.
 		if personalEvents[e.Type] {
 			return
+		}
+		if e.RecipientIDs != nil {
+			for _, recipientID := range e.RecipientIDs {
+				sendToRecipient(b, e, recipientID)
+			}
+			return
+		}
+		if resolveAudience != nil {
+			if recipients, scoped := resolveAudience(context.Background(), e); scoped {
+				e.RecipientIDs = recipients
+				for _, recipientID := range recipients {
+					sendToRecipient(b, e, recipientID)
+				}
+				return
+			}
 		}
 
 		msg := map[string]any{
