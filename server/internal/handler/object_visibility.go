@@ -160,16 +160,21 @@ func (h *Handler) issueEventRecipients(ctx context.Context, issue db.Issue) []st
 }
 
 func (h *Handler) auditRescueObject(ctx context.Context, scope objectVisibility, objectType string, objectID pgtype.UUID, action string) bool {
-	if !scope.rescue {
-		return true
-	}
-	_, err := h.DB.Exec(ctx, `INSERT INTO object_visibility_audit
-    (workspace_id, actor_user_id, object_type, object_id, action)
-VALUES ($1, $2, $3, $4, $5)`, scope.workspaceID, scope.userID, objectType, objectID, action)
+	err := h.recordRescueObject(ctx, scope, objectType, objectID, action)
 	if err != nil {
 		slog.Error("record object visibility rescue access failed", "workspace_id", uuidToString(scope.workspaceID), "actor_user_id", uuidToString(scope.userID), "object_type", objectType, "object_id", uuidToString(objectID), "action", action, "error", err)
 	}
 	return err == nil
+}
+
+func (h *Handler) recordRescueObject(ctx context.Context, scope objectVisibility, objectType string, objectID pgtype.UUID, action string) error {
+	if !scope.rescue {
+		return nil
+	}
+	_, err := h.DB.Exec(ctx, `INSERT INTO object_visibility_audit
+    (workspace_id, actor_user_id, object_type, object_id, action)
+VALUES ($1, $2, $3, $4, $5)`, scope.workspaceID, scope.userID, objectType, objectID, action)
+	return err
 }
 
 func (h *Handler) visibleProjectIssueStats(ctx context.Context, workspaceID pgtype.UUID, projectIDs []pgtype.UUID, scope objectVisibility) (map[string]db.GetProjectIssueStatsRow, error) {
