@@ -185,6 +185,7 @@ export function MessageComposer({
   const [internalText, setInternalText] = useState("");
   const [attachments, setAttachments] = useState<ComposerAttachmentItem[]>([]);
   const [submitting, setSubmitting] = useState(false);
+  const focusAfterInputLayout = useRef(false);
 
   // Hybrid controlled / uncontrolled pattern (React-canonical). Chat
   // passes `value`/`onChangeText` for cross-session draft persistence;
@@ -215,18 +216,25 @@ export function MessageComposer({
     };
   }, [clearMentions]);
 
-  // Auto-expand + focus when an `expandTrigger` changes. Comment uses
-  // this to react to the long-press → reply flow setting a reply target.
+  // Auto-expand + focus when an `expandTrigger` changes. Wait for the
+  // newly-mounted input to complete native layout before requesting focus;
+  // Android can accept focus before its input view is ready without showing
+  // the soft keyboard.
   const triggerSeen = useRef<string | null>(null);
-  if (
-    expandTrigger &&
-    triggerSeen.current !== expandTrigger &&
-    !disabled
-  ) {
+  useEffect(() => {
+    if (!expandTrigger || triggerSeen.current === expandTrigger || disabled) {
+      return;
+    }
     triggerSeen.current = expandTrigger;
+    focusAfterInputLayout.current = true;
     setExpanded(true);
+  }, [expandTrigger, disabled]);
+
+  const handleInputLayout = useCallback(() => {
+    if (!focusAfterInputLayout.current) return;
+    focusAfterInputLayout.current = false;
     requestAnimationFrame(() => inputRef.current?.focus());
-  }
+  }, []);
 
   const hasInFlightUpload = attachments.some((a) => a.status === "uploading");
   const canSend =
@@ -547,6 +555,7 @@ export function MessageComposer({
 
         <TextInput
           ref={inputRef}
+          onLayout={handleInputLayout}
           value={text}
           onChangeText={setText}
           onBlur={onBlur}
