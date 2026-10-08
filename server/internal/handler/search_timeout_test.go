@@ -153,7 +153,7 @@ func TestRunSearchQuery_WorkMemIsTransactionLocal(t *testing.T) {
 		t.Fatalf("read transaction_read_only after search: %v", err)
 	}
 	if readOnlyAfter != readOnlyBefore {
-		t.Fatalf("transaction_read_only leaked: before=%t after=%t", readOnlyBefore, readOnlyAfter)
+		t.Fatalf("transaction_read_only leaked: before=%q after=%q", readOnlyBefore, readOnlyAfter)
 	}
 }
 
