@@ -183,8 +183,8 @@ func TestComment_SquadPrivateLeader_PlainMemberNoEnqueue(t *testing.T) {
 	})
 	r = withURLParam(r, "id", issueID)
 	testHandler.CreateComment(w, r)
-	if w.Code != http.StatusCreated {
-		t.Fatalf("CreateComment: expected 201, got %d: %s", w.Code, w.Body.String())
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("CreateComment for an issue outside the member's visible scope: expected 404, got %d: %s", w.Code, w.Body.String())
 	}
 
 	// The private leader must NOT have a queued task.

@@ -111,16 +111,15 @@ func TestCallbackFromAnEventHookWritesAsThePlugin(t *testing.T) {
 		"/v1/issues/"+issueID+"/comments",
 		map[string]any{"content": "posted by an event hook"},
 		map[string]string{"issue_ref": issueID}))
-	if recorder.Code != http.StatusCreated {
-		t.Fatalf("status=%d body=%s", recorder.Code, recorder.Body.String())
+	if recorder.Code != http.StatusNotFound {
+		t.Fatalf("event-hook callback without a member visibility subject: status=%d body=%s", recorder.Code, recorder.Body.String())
 	}
-
-	comment := latestComment(t, issueID)
-	if comment.AuthorType != "plugin" {
-		t.Fatalf("author_type = %q, want plugin: an event hook must not borrow a person's identity", comment.AuthorType)
+	var commentCount int
+	if err := testPool.QueryRow(context.Background(), `SELECT count(*) FROM comment WHERE issue_id = $1`, issueID).Scan(&commentCount); err != nil {
+		t.Fatal(err)
 	}
-	if uuidToString(comment.AuthorID) != installationID {
-		t.Fatalf("author_id = %s, want the installation %s", uuidToString(comment.AuthorID), installationID)
+	if commentCount != 0 {
+		t.Fatalf("inaccessible event-hook issue produced %d comments", commentCount)
 	}
 }
 

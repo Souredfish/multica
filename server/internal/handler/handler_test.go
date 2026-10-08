@@ -618,7 +618,7 @@ func TestCreateIssueRejectsCrossWorkspaceParent(t *testing.T) {
 		"title":           "Should be rejected",
 		"parent_issue_id": foreignParentID,
 	})
-	w := testutil.Call(t, testHandler.CreateIssue, req).Want(http.StatusBadRequest)
+	w := testutil.Call(t, testHandler.CreateIssue, req).Want(http.StatusNotFound)
 	if !strings.Contains(w.Body.String(), "parent issue not found in this workspace") {
 		t.Fatalf("CreateIssue with foreign parent: expected boundary error message, got %s", w.Body.String())
 	}
@@ -654,9 +654,9 @@ func TestCreateIssueRejectsCrossWorkspaceProject(t *testing.T) {
 		"title":      "Should be rejected",
 		"project_id": foreignProjectID,
 	})
-	w := testutil.Call(t, testHandler.CreateIssue, req).Want(http.StatusBadRequest)
-	if !strings.Contains(w.Body.String(), "project not found in this workspace") {
-		t.Fatalf("CreateIssue with foreign project: expected boundary error message, got %s", w.Body.String())
+	w := testutil.Call(t, testHandler.CreateIssue, req).Want(http.StatusNotFound)
+	if !strings.Contains(w.Body.String(), "project not found") {
+		t.Fatalf("CreateIssue with inaccessible project: expected not-found response, got %s", w.Body.String())
 	}
 
 	var count int

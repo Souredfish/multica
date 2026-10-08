@@ -77,7 +77,13 @@ func TestTaskMessageCallIDLiveAndHistory(t *testing.T) {
 				req := testutil.JSONRequest(http.MethodGet, "/api/tasks/"+taskID+"/messages"+suffix, nil)
 				req = testutil.WithURLParams(req, "taskId", taskID)
 				ctx := middleware.WithDaemonContext(req.Context(), testWorkspaceID, "call-id-daemon")
-				ctx = middleware.SetMemberContext(ctx, testWorkspaceID, db.Member{})
+				member, err := h.Queries.GetMemberByUserAndWorkspace(context.Background(), db.GetMemberByUserAndWorkspaceParams{
+					UserID: util.MustParseUUID(testUserID), WorkspaceID: util.MustParseUUID(testWorkspaceID),
+				})
+				if err != nil {
+					t.Fatalf("load authenticated member: %v", err)
+				}
+				ctx = middleware.SetMemberContext(ctx, testWorkspaceID, member)
 				var history []map[string]any
 				testutil.Call(t, reader.handler, req.WithContext(ctx)).Want(http.StatusOK).JSON(&history)
 				want := live

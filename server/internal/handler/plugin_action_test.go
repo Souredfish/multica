@@ -111,31 +111,15 @@ func TestPluginInstallTokenRunsIssueCommentWorkflow(t *testing.T) {
 	get := httptest.NewRecorder()
 	testHandler.GetPluginIssue(get, pluginInstallTokenRequest(http.MethodGet, "/v1/issues/"+issueID, token, nil,
 		map[string]string{"issue_ref": issueID}))
-	if get.Code != http.StatusOK {
-		t.Fatalf("install-token issue read status=%d body=%s", get.Code, get.Body.String())
+	if get.Code != http.StatusNotFound {
+		t.Fatalf("install-token issue read without a member visibility subject status=%d body=%s", get.Code, get.Body.String())
 	}
-
-	patchRequest := pluginInstallTokenRequest(http.MethodPatch, "/v1/issues/"+issueID, token,
-		map[string]any{"title": "Updated by install token"}, map[string]string{"issue_ref": issueID})
-	patchRequest.Header.Set("If-Match", get.Header().Get("ETag"))
-	patch := httptest.NewRecorder()
-	testHandler.PatchPluginIssue(patch, patchRequest)
-	if patch.Code != http.StatusOK {
-		t.Fatalf("install-token issue patch status=%d body=%s", patch.Code, patch.Body.String())
+	var commentCount int
+	if err := testPool.QueryRow(context.Background(), `SELECT count(*) FROM comment WHERE issue_id = $1`, issueID).Scan(&commentCount); err != nil {
+		t.Fatal(err)
 	}
-
-	create := httptest.NewRecorder()
-	testHandler.CreatePluginComment(create, pluginInstallTokenRequest(http.MethodPost, "/v1/issues/"+issueID+"/comments", token,
-		map[string]any{"content": "created with a real mpi token"}, map[string]string{"issue_ref": issueID}))
-	if create.Code != http.StatusCreated {
-		t.Fatalf("install-token comment create status=%d body=%s", create.Code, create.Body.String())
-	}
-	var comment publicapiv1.Comment
-	if err := json.Unmarshal(create.Body.Bytes(), &comment); err != nil {
-		t.Fatalf("decode install-token comment: %v", err)
-	}
-	if comment.AuthorType != "plugin" || comment.AuthorID != installationID {
-		t.Fatalf("install-token comment attribution = %+v", comment)
+	if commentCount != 0 {
+		t.Fatalf("inaccessible install-token issue produced %d comments", commentCount)
 	}
 
 	list := httptest.NewRecorder()

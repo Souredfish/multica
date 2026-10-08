@@ -64,9 +64,11 @@ func TestUpdateIssueInvalidPriorityReturns400(t *testing.T) {
 }
 
 func TestBatchUpdateIssuesInvalidStatusReturns400(t *testing.T) {
+	issueID := createTestIssue(t, "batch invalid status issue", "todo", "none")
+	t.Cleanup(func() { deleteTestIssue(t, issueID) })
 	w := httptest.NewRecorder()
 	req := newRequest("POST", "/api/issues/batch-update", map[string]any{
-		"issue_ids": []string{"not-needed"},
+		"issue_ids": []string{issueID},
 		"updates": map[string]any{
 			"status": "active",
 		},

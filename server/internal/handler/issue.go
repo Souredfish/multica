@@ -1178,10 +1178,18 @@ func (h *Handler) SearchIssues(w http.ResponseWriter, r *http.Request) {
 	}
 
 	sqlQuery, args := buildSearchQuery(q, terms, queryNum, hasNum, includeClosed, terminalStatusKeys, visibility)
-	// Fill placeholder args: $4 = workspace_id, last two = limit, offset
+	// Fill the reserved placeholders. The visibility predicate is appended
+	// after limit/offset for non-rescue members, so account for that optional
+	// argument instead of relying on fixed positions near the end of args.
 	args[3] = wsUUID
-	args[len(args)-5] = limit
-	args[len(args)-4] = offset
+	limitIndex := len(args) - 2
+	offsetIndex := len(args) - 1
+	if !visibility.rescue {
+		limitIndex--
+		offsetIndex--
+	}
+	args[limitIndex] = limit
+	args[offsetIndex] = offset
 
 	var results []searchResult
 	err := runSearchQuery(ctx, h.TxStarter, sqlQuery, args, func(rows pgx.Rows) error {
