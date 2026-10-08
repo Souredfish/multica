@@ -2721,13 +2721,13 @@ func (h *Handler) ListChildrenByParents(w http.ResponseWriter, r *http.Request) 
 	for i, child := range children {
 		ids[i] = child.ID
 	}
-	labelsMap := h.labelsByIssue(r.Context(), issue.WorkspaceID, ids)
+	labelsMap := h.labelsByIssue(r.Context(), wsUUID, ids)
 	// Sub-issue progress is computed from these rows (the CLI's `issue children`
 	// stage counts, among others), so they carry the resolved category — a
 	// custom completed status must count as completed. One Resolver for the whole list:
 	// built-in statuses still cost no query, and a list full of custom ones
 	// costs one catalog read rather than one per row.
-	statusResolver := issuestatus.NewResolver(issue.WorkspaceID)
+	statusResolver := issuestatus.NewResolver(wsUUID)
 	resp := make([]IssueResponse, len(children))
 	for i, child := range children {
 		resp[i] = issueToResponse(child, prefix)
