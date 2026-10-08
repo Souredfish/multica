@@ -115,7 +115,7 @@ func runSearchQuery(
 	args []any,
 	rowsFn func(pgx.Rows) error,
 ) error {
-	tx, err := txStarter.Begin(ctx)
+	tx, err := beginSearchReadOnlyTx(ctx, txStarter)
 	if err != nil {
 		return fmt.Errorf("begin search tx: %w", err)
 	}
@@ -142,13 +142,6 @@ func runSearchQuery(
 			return fmt.Errorf("set search work_mem: %w", err)
 		}
 	}
-	// The read-only mode is applied here rather than via TxOptions so we
-	// keep the txStarter interface signature (Begin only) intact. It's
-	// belt-and-suspenders — the search queries only SELECT anyway.
-	if _, err := tx.Exec(ctx, "SET LOCAL transaction_read_only = on"); err != nil {
-		return fmt.Errorf("set search transaction_read_only: %w", err)
-	}
-
 	rows, err := tx.Query(ctx, sql, args...)
 	if err != nil {
 		return err
@@ -166,6 +159,27 @@ func runSearchQuery(
 	}
 	committed = true
 	return nil
+}
+
+// beginSearchReadOnlyTx uses PostgreSQL's transaction option when the starter
+// supports it. This keeps pooled connections read-only for exactly the search
+// transaction and prevents session state from affecting later rescue-audit
+// writes on a reused connection.
+func beginSearchReadOnlyTx(ctx context.Context, starter txStarter) (pgx.Tx, error) {
+	if readOnlyStarter, ok := starter.(interface {
+		BeginTx(context.Context, pgx.TxOptions) (pgx.Tx, error)
+	}); ok {
+		return readOnlyStarter.BeginTx(ctx, pgx.TxOptions{AccessMode: pgx.ReadOnly})
+	}
+	tx, err := starter.Begin(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if _, err := tx.Exec(ctx, "SET LOCAL transaction_read_only = on"); err != nil {
+		_ = tx.Rollback(context.Background())
+		return nil, fmt.Errorf("set search transaction_read_only: %w", err)
+	}
+	return tx, nil
 }
 
 // isSearchStatementTimeout reports whether err is the canonical Postgres

@@ -618,7 +618,7 @@ func TestCreateIssueRejectsCrossWorkspaceParent(t *testing.T) {
 		"title":           "Should be rejected",
 		"parent_issue_id": foreignParentID,
 	})
-	w := testutil.Call(t, testHandler.CreateIssue, req).Want(http.StatusNotFound)
+	w := testutil.Call(t, testHandler.CreateIssue, req).Want(http.StatusBadRequest)
 	if !strings.Contains(w.Body.String(), "parent issue not found in this workspace") {
 		t.Fatalf("CreateIssue with foreign parent: expected boundary error message, got %s", w.Body.String())
 	}

@@ -76,6 +76,8 @@ func TestTaskMessageCallIDLiveAndHistory(t *testing.T) {
 			t.Run(reader.name+suffix, func(t *testing.T) {
 				req := testutil.JSONRequest(http.MethodGet, "/api/tasks/"+taskID+"/messages"+suffix, nil)
 				req = testutil.WithURLParams(req, "taskId", taskID)
+				req.Header.Set("X-User-ID", testUserID)
+				req.Header.Set("X-Workspace-ID", testWorkspaceID)
 				ctx := middleware.WithDaemonContext(req.Context(), testWorkspaceID, "call-id-daemon")
 				member, err := h.Queries.GetMemberByUserAndWorkspace(context.Background(), db.GetMemberByUserAndWorkspaceParams{
 					UserID: util.MustParseUUID(testUserID), WorkspaceID: util.MustParseUUID(testWorkspaceID),
