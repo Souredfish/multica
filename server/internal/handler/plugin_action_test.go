@@ -125,8 +125,8 @@ func TestPluginInstallTokenRunsIssueCommentWorkflow(t *testing.T) {
 	list := httptest.NewRecorder()
 	testHandler.ListPluginComments(list, pluginInstallTokenRequest(http.MethodGet, "/v1/issues/"+issueID+"/comments", token, nil,
 		map[string]string{"issue_ref": issueID}))
-	if list.Code != http.StatusOK || !strings.Contains(list.Body.String(), comment.ID) {
-		t.Fatalf("install-token comment list status=%d body=%s", list.Code, list.Body.String())
+	if list.Code != http.StatusNotFound {
+		t.Fatalf("install-token comment list without a member visibility subject status=%d body=%s", list.Code, list.Body.String())
 	}
 }
 
