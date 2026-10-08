@@ -162,9 +162,7 @@ func runSearchQuery(
 }
 
 // beginSearchReadOnlyTx uses PostgreSQL's transaction option when the starter
-// supports it. This keeps pooled connections read-only for exactly the search
-// transaction and prevents session state from affecting later rescue-audit
-// writes on a reused connection.
+// supports it so read-only behavior is attached to the transaction itself.
 func beginSearchReadOnlyTx(ctx context.Context, starter txStarter) (pgx.Tx, error) {
 	if readOnlyStarter, ok := starter.(interface {
 		BeginTx(context.Context, pgx.TxOptions) (pgx.Tx, error)

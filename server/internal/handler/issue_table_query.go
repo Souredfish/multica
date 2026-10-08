@@ -706,7 +706,7 @@ func (h *Handler) compileIssueTableQuery(w http.ResponseWriter, r *http.Request,
 	}, true
 }
 
-func (h *Handler) auditIssueTableRescue(w http.ResponseWriter, r *http.Request, query issueTableSQL) bool {
+func (h *Handler) auditIssueTableRescue(w http.ResponseWriter, r *http.Request, query issueTableSQL, auditWriter dbExecutor) bool {
 	if !query.visibility.rescue {
 		return true
 	}
@@ -731,8 +731,13 @@ func (h *Handler) auditIssueTableRescue(w http.ResponseWriter, r *http.Request, 
 		return false
 	}
 	rows.Close()
+	// The issue IDs are read from the repeatable-read, read-only snapshot. The
+	// rescue audit is a write, so it must use the handler's primary executor,
+	// not snapshot.DB (which is the read-only transaction).
+	auditHandler := *h
+	auditHandler.DB = auditWriter
 	for _, id := range ids {
-		if !h.auditRescueObject(r.Context(), query.visibility, "issue", id, "table_query") {
+		if !auditHandler.auditRescueObject(r.Context(), query.visibility, "issue", id, "table_query") {
 			writeError(w, http.StatusInternalServerError, "failed to record rescue access")
 			return false
 		}

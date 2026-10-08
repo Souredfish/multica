@@ -364,6 +364,7 @@ func (h *Handler) ListIssueTableFacets(w http.ResponseWriter, r *http.Request) {
 	}
 	r, cancel := withIssueTableQueryTimeout(r)
 	defer cancel()
+	auditWriter := h.DB
 	snapshot, tx, err := h.beginIssueTableSnapshot(r.Context())
 	if err != nil {
 		slog.Warn("ListIssueTableFacets snapshot failed", append(logger.RequestAttrs(r), "error", err)...)
@@ -382,7 +383,7 @@ func (h *Handler) ListIssueTableFacets(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	if !h.auditIssueTableRescue(w, r, base) {
+	if !h.auditIssueTableRescue(w, r, base, auditWriter) {
 		return
 	}
 

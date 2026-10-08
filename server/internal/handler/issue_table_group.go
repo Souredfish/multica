@@ -900,6 +900,7 @@ func (h *Handler) ListIssueTableGroups(w http.ResponseWriter, r *http.Request) {
 	}
 	r, cancel := withIssueTableQueryTimeout(r)
 	defer cancel()
+	auditWriter := h.DB
 	snapshot, tx, err := h.beginIssueTableSnapshot(r.Context())
 	if err != nil {
 		slog.Warn("ListIssueTableGroups snapshot failed", append(logger.RequestAttrs(r), "error", err)...)
@@ -921,7 +922,7 @@ func (h *Handler) ListIssueTableGroups(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	if !h.auditIssueTableRescue(w, r, compiled) {
+	if !h.auditIssueTableRescue(w, r, compiled, auditWriter) {
 		return
 	}
 	group, ok := h.resolveIssueTableGroup(w, r, compiled.workspaceID, request.Group, false)

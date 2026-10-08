@@ -628,6 +628,32 @@ func TestIssueTableRowsCommitsBeforeBestEffortEnrichment(t *testing.T) {
 	}
 }
 
+func TestIssueTableRowsAuditRescueOutsideReadOnlySnapshot(t *testing.T) {
+	issueID := createTestIssue(t, "table rescue audit snapshot", "todo", "none")
+	t.Cleanup(func() { deleteTestIssue(t, issueID) })
+
+	recorder := httptest.NewRecorder()
+	testHandler.ListIssueTableRows(recorder, newRequest("POST", "/api/issues/table/rows", issueTableRowsRequest{
+		Query: issueTableQuerySpec{Scope: issueTableScope{Kind: "workspace"}},
+		Group: issueTableGroupSpec{Kind: "none"},
+		Page:  issueTablePageRequest{Limit: 100},
+	}))
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("rows status = %d: %s", recorder.Code, recorder.Body.String())
+	}
+
+	var auditCount int
+	if err := testPool.QueryRow(context.Background(), `
+		SELECT count(*) FROM object_visibility_audit
+		WHERE workspace_id = $1 AND actor_user_id = $2 AND object_id = $3 AND action = 'table_query'
+	`, testWorkspaceID, testUserID, issueID).Scan(&auditCount); err != nil {
+		t.Fatalf("count rescue audit rows: %v", err)
+	}
+	if auditCount != 1 {
+		t.Fatalf("rescue audit rows = %d, want 1", auditCount)
+	}
+}
+
 func TestIssueTableStatusGroupingOverOneThousandRows(t *testing.T) {
 	ctx := context.Background()
 	suffix := time.Now().UnixNano()
