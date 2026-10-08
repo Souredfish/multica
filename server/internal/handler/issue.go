@@ -2608,7 +2608,7 @@ func (h *Handler) ListChildIssues(w http.ResponseWriter, r *http.Request) {
 		if !h.canReadIssue(r.Context(), visibility, child) || !child.ParentIssueID.Valid {
 			continue
 		}
-		parent, err := h.Queries.GetIssueInWorkspace(r.Context(), db.GetIssueInWorkspaceParams{ID: child.ParentIssueID, WorkspaceID: wsUUID})
+		parent, err := h.Queries.GetIssueInWorkspace(r.Context(), db.GetIssueInWorkspaceParams{ID: child.ParentIssueID, WorkspaceID: issue.WorkspaceID})
 		if err == nil && h.canReadIssue(r.Context(), visibility, parent) {
 			visibleChildren = append(visibleChildren, child)
 		}
@@ -2721,13 +2721,13 @@ func (h *Handler) ListChildrenByParents(w http.ResponseWriter, r *http.Request) 
 	for i, child := range children {
 		ids[i] = child.ID
 	}
-	labelsMap := h.labelsByIssue(r.Context(), wsUUID, ids)
+	labelsMap := h.labelsByIssue(r.Context(), issue.WorkspaceID, ids)
 	// Sub-issue progress is computed from these rows (the CLI's `issue children`
 	// stage counts, among others), so they carry the resolved category — a
 	// custom completed status must count as completed. One Resolver for the whole list:
 	// built-in statuses still cost no query, and a list full of custom ones
 	// costs one catalog read rather than one per row.
-	statusResolver := issuestatus.NewResolver(wsUUID)
+	statusResolver := issuestatus.NewResolver(issue.WorkspaceID)
 	resp := make([]IssueResponse, len(children))
 	for i, child := range children {
 		resp[i] = issueToResponse(child, prefix)
@@ -2789,7 +2789,7 @@ GROUP BY child.parent_issue_id`, args...)
 		Total         int64  `json:"total"`
 		Done          int64  `json:"done"`
 	}
-	resp := make([]progressEntry, 0, len(rows))
+	resp := make([]progressEntry, 0)
 	for rows.Next() {
 		var parentID pgtype.UUID
 		var total, done int64

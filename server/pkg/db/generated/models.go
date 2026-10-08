@@ -1176,6 +1176,16 @@ type NotificationPreference struct {
 	UpdatedAt   pgtype.Timestamptz `json:"updated_at"`
 }
 
+type ObjectVisibilityAudit struct {
+	ID          pgtype.UUID        `json:"id"`
+	WorkspaceID pgtype.UUID        `json:"workspace_id"`
+	ActorUserID pgtype.UUID        `json:"actor_user_id"`
+	ObjectType  string             `json:"object_type"`
+	ObjectID    pgtype.UUID        `json:"object_id"`
+	Action      string             `json:"action"`
+	OccurredAt  pgtype.Timestamptz `json:"occurred_at"`
+}
+
 type PersonalAccessToken struct {
 	ID          pgtype.UUID        `json:"id"`
 	UserID      pgtype.UUID        `json:"user_id"`

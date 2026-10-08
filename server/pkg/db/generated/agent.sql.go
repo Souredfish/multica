@@ -5407,7 +5407,12 @@ type ListActiveTasksByIssueFamilyRow struct {
 // interesting rows, and bounded because a parent with hundreds of children must
 // not turn one coordination read into an unbounded scan.
 func (q *Queries) ListActiveTasksByIssueFamily(ctx context.Context, arg ListActiveTasksByIssueFamilyParams) ([]ListActiveTasksByIssueFamilyRow, error) {
-	rows, err := q.db.Query(ctx, listActiveTasksByIssueFamily, arg.WorkspaceID, arg.RootIssueID, arg.UserID, arg.RowLimit)
+	rows, err := q.db.Query(ctx, listActiveTasksByIssueFamily,
+		arg.WorkspaceID,
+		arg.RootIssueID,
+		arg.UserID,
+		arg.RowLimit,
+	)
 	if err != nil {
 		return nil, err
 	}
