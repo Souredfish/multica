@@ -3,6 +3,7 @@ package handler
 import (
 	"context"
 	"fmt"
+	"log/slog"
 
 	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/multica-ai/multica/server/internal/util"
@@ -165,6 +166,9 @@ func (h *Handler) auditRescueObject(ctx context.Context, scope objectVisibility,
 	_, err := h.DB.Exec(ctx, `INSERT INTO object_visibility_audit
     (workspace_id, actor_user_id, object_type, object_id, action)
 VALUES ($1, $2, $3, $4, $5)`, scope.workspaceID, scope.userID, objectType, objectID, action)
+	if err != nil {
+		slog.Error("record object visibility rescue access failed", "workspace_id", uuidToString(scope.workspaceID), "actor_user_id", uuidToString(scope.userID), "object_type", objectType, "object_id", uuidToString(objectID), "action", action, "error", err)
+	}
 	return err == nil
 }
 
