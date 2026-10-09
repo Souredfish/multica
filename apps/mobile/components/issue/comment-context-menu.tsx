@@ -30,7 +30,7 @@ import {
 import { appConfigOptions } from "@/data/queries/billing";
 import { QUICK_EMOJIS } from "@/lib/quick-emojis";
 import { useT } from "@/lib/i18n";
-import type { ActionMenuOption } from "@/components/issue/action-menu-modal";
+import type { ActionMenuOption } from "@/components/ui/action-menu-modal";
 
 type CommentAction =
   | { kind: "reply" }

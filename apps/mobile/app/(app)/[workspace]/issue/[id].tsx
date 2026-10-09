@@ -27,7 +27,7 @@ import { IconButton } from "@/components/ui/icon-button";
 import {
   ActionMenuModal,
   type ActionMenuOption,
-} from "@/components/issue/action-menu-modal";
+} from "@/components/ui/action-menu-modal";
 import { TimelineList } from "@/components/issue/timeline-list";
 import { AgentHeaderBadge } from "@/components/issue/agent-header-badge";
 import { InlineCommentComposer } from "@/components/issue/inline-comment-composer";

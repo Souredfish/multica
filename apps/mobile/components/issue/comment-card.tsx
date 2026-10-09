@@ -61,7 +61,7 @@ import { useT } from "@/lib/i18n";
 import { ReactionBar } from "./reaction-bar";
 import { useCommentLongPress } from "./comment-context-menu";
 import { useCommentSelectStore } from "@/data/comment-select-store";
-import { ActionMenuModal } from "@/components/issue/action-menu-modal";
+import { ActionMenuModal } from "@/components/ui/action-menu-modal";
 
 interface Props {
   entry: TimelineEntry;
