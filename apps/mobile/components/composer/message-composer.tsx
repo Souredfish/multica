@@ -66,7 +66,7 @@ import {
   type MentionChip,
 } from "@/components/issue/composer-attachment-row";
 import { useT } from "@/lib/i18n";
-import { shouldWaitForInputLayout } from "@/components/composer/focus-trigger";
+import { shouldWaitForInputLayout } from "@/lib/composer-focus-trigger";
 
 export interface MessageComposerReplyTarget {
   actorName: string;

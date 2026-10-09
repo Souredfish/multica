@@ -1,6 +1,6 @@
 // @vitest-environment node
 import { describe, expect, it } from "vitest";
-import { shouldWaitForInputLayout } from "./focus-trigger";
+import { shouldWaitForInputLayout } from "./composer-focus-trigger";
 
 describe("composer expand trigger focus", () => {
   it("waits for native input layout when the first trigger expands the composer", () => {
