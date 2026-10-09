@@ -66,7 +66,7 @@ import {
   type MentionChip,
 } from "@/components/issue/composer-attachment-row";
 import { useT } from "@/lib/i18n";
-import { shouldFocusAfterTrigger } from "@/components/composer/focus-trigger";
+import { shouldWaitForInputLayout } from "@/components/composer/focus-trigger";
 
 export interface MessageComposerReplyTarget {
   actorName: string;
@@ -227,7 +227,7 @@ export function MessageComposer({
       return;
     }
     triggerSeen.current = expandTrigger;
-    focusAfterInputLayout.current = shouldFocusAfterTrigger(expanded);
+    focusAfterInputLayout.current = shouldWaitForInputLayout(expanded);
     setExpanded(true);
     if (expanded) {
       requestAnimationFrame(() => inputRef.current?.focus());
