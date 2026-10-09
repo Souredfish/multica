@@ -66,6 +66,7 @@ import {
   type MentionChip,
 } from "@/components/issue/composer-attachment-row";
 import { useT } from "@/lib/i18n";
+import { shouldFocusAfterTrigger } from "@/components/composer/focus-trigger";
 
 export interface MessageComposerReplyTarget {
   actorName: string;
@@ -226,9 +227,12 @@ export function MessageComposer({
       return;
     }
     triggerSeen.current = expandTrigger;
-    focusAfterInputLayout.current = true;
+    focusAfterInputLayout.current = shouldFocusAfterTrigger(expanded);
     setExpanded(true);
-  }, [expandTrigger, disabled]);
+    if (expanded) {
+      requestAnimationFrame(() => inputRef.current?.focus());
+    }
+  }, [expandTrigger, disabled, expanded]);
 
   const handleInputLayout = useCallback(() => {
     if (!focusAfterInputLayout.current) return;
