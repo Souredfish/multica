@@ -66,7 +66,10 @@ import {
   type MentionChip,
 } from "@/components/issue/composer-attachment-row";
 import { useT } from "@/lib/i18n";
-import { shouldWaitForInputLayout } from "@/lib/composer-focus-trigger";
+import {
+  shouldCollapseAfterBlur,
+  shouldWaitForInputLayout,
+} from "@/lib/composer-focus-trigger";
 
 export interface MessageComposerReplyTarget {
   actorName: string;
@@ -187,6 +190,12 @@ export function MessageComposer({
   const [attachments, setAttachments] = useState<ComposerAttachmentItem[]>([]);
   const [submitting, setSubmitting] = useState(false);
   const focusAfterInputLayout = useRef(false);
+  const triggerRevision = useRef(0);
+  const previousExpandTrigger = useRef(expandTrigger ?? null);
+  if (previousExpandTrigger.current !== (expandTrigger ?? null)) {
+    previousExpandTrigger.current = expandTrigger ?? null;
+    triggerRevision.current += 1;
+  }
 
   // Hybrid controlled / uncontrolled pattern (React-canonical). Chat
   // passes `value`/`onChangeText` for cross-session draft persistence;
@@ -461,12 +470,20 @@ export function MessageComposer({
    *  IconButton tap (which briefly resigns first responder) doesn't
    *  trigger a collapse before its onPress runs. */
   const onBlur = useCallback(() => {
+    const triggerRevisionAtBlur = triggerRevision.current;
     setTimeout(() => {
-      const empty =
+      const isEmpty =
         text.trim().length === 0 &&
         attachments.length === 0 &&
         mentions.length === 0;
-      if (empty && !inputRef.current?.isFocused()) {
+      if (
+        shouldCollapseAfterBlur({
+          isEmpty,
+          isFocused: !!inputRef.current?.isFocused(),
+          triggerRevisionAtBlur,
+          currentTriggerRevision: triggerRevision.current,
+        })
+      ) {
         setExpanded(false);
         onClearReplyTarget?.();
       }
